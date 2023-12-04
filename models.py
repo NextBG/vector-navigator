@@ -7,18 +7,31 @@ from prettytable import PrettyTable
 from vint_train.models.vint.self_attention import PositionalEncoding
 
 class Vnav(nn.Module):
-    def __init__(self):
-        raise NotImplementedError
+    def __init__(
+        self,
+        vision_encoder: nn.Module,
+        noise_pred_net: nn.Module,
+        ):
+        super().__init__()
+        self.vision_encoder = vision_encoder
+        self.noise_pred_net = noise_pred_net
     
-    def forward(self):
-        raise NotImplementedError
+    def forward(self, func_name: str, **kwargs):
+        if func_name == "vision_encoder" :
+            output = self.vision_encoder(kwargs["obs_img"], kwargs["goal_vec"])
+        elif func_name == "noise_pred_net":
+            output = self.noise_pred_net(sample=kwargs["sample"], timestep=kwargs["timestep"], global_cond=kwargs["global_cond"])
+        else:
+            raise NotImplementedError
+        return output
+        
     
 class VisionEncoder(nn.Module):
     def __init__(
             self,
             context_size: int = 5,
             obs_encoder: Optional[str] = "efficientnet-b0",
-            obs_encoding_size: Optional[int] = 512,
+            obs_encoding_size: Optional[int] = 256,
             mha_num_attention_heads: Optional[int] = 2,
             mha_num_attention_layers: Optional[int] = 2,
             mha_ff_dim_factor: Optional[int] = 4,
@@ -39,7 +52,7 @@ class VisionEncoder(nn.Module):
             raise NotImplementedError
         
         # Initialize the goal encoder: float[3] to float[obs_encoding_size]
-        self.goal_encoder = nn.Linear(3, self.goal_encoding_size)
+        self.goal_encoder = nn.Linear(2, self.goal_encoding_size)
 
         # Initialize compression layers if necessary
         if self.num_obs_features != self.obs_encoding_size:
@@ -55,13 +68,14 @@ class VisionEncoder(nn.Module):
             dim_feedforward=mha_ff_dim_factor*self.obs_encoding_size,
             activation="gelu",
             batch_first=True,
-            norm_first=True
+            norm_first=False # XXX: modified here, not sure if it's correct
         )
         self.sa_encoder= nn.TransformerEncoder(self.sa_layer, num_layers=mha_num_attention_layers)
 
     def forward(self, obs_img: torch.tensor, goal_vec: torch.tensor) -> torch.tensor:
         # Vector goal encoding [batch_size, 3] -> [batch_size, goal_encoding_size]
         goal_enc = self.goal_encoder(goal_vec)
+
         goal_enc = goal_enc.unsqueeze(1) # Add a sequence dimension
 
         # Observation encoding [batch_size, 3*(context_size+1), width, height] -> [batch_size, context_size+1, obs_encoding_size] TODO: understand this part
@@ -74,33 +88,19 @@ class VisionEncoder(nn.Module):
             obs_enc = obs_enc.flatten(start_dim=1)
             obs_enc = self.obs_encoder._dropout(obs_enc)
         obs_enc = self.compress_obs_enc(obs_enc)
-
+        
         obs_enc = obs_enc.unsqueeze(0) # Add a batch_size dimension
         obs_enc = obs_enc.reshape((-1, self.context_size+1, self.obs_encoding_size)) # [batch_size, context_size+1, obs_encoding_size]
 
         # Concatenate observations and goal to form context encoding
         context_enc = torch.cat([obs_enc, goal_enc], dim=1)
-
-        # Apply positional encoding to observation encoding
-        context_enc = self.positional_encoding(context_enc)
+        context_enc = self.positional_encoding(context_enc) # [batch_size, context_size+2, obs_encoding_size]
 
         # Self-attention
         context_token = self.sa_encoder(context_enc)
         context_token = torch.mean(context_token, dim=1) # Average over the sequence dimension
 
         return context_token
-
-def count_parameters(model):
-    table = PrettyTable(["Modules", "Parameters"])
-    total_params = 0
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad: continue
-        params = parameter.numel()
-        table.add_row([name, params])
-        total_params+=params
-    # print(table)
-    print(f"Total Trainable Params: {total_params/1e6:.2f}M")
-    return total_params
 
 # Test the model with random inputs
 if __name__ == "__main__":

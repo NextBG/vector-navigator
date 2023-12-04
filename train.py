@@ -12,7 +12,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader, ConcatDataset
 
 from warmup_scheduler import GradualWarmupScheduler
-from models import VectorNavigator, VisionEncoder
+from models import Vnav, VisionEncoder
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
@@ -22,6 +22,12 @@ from vnav_dataset import VnavDataset
 '''
     Train the model
 '''
+
+# Dataset
+PROJECT_ROOT_DIR = "/home/caoruixiang/nomad_caorx/vector-navigator"
+DATASETS_DIR = "/home/caoruixiang/vecnav_dataset/mount_point/datasets" # HACK: hardcode the dataset path
+    
+
 def main(config):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,30 +42,36 @@ def main(config):
 
     # Normalization for image
     transform = ([
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # ImageNet
     ])
     transform = transforms.Compose(transform)
 
-    # Dataset
     train_datasets = []
-    test_datasets = []
+    test_datasets = {}
     for dataset_name in config["datasets"]:
-        data_config = config["datasets"][dataset_name]
-        dataset = VnavDataset(
-            # TODO: Dataset parameters
-        )
-        # Train datasets
-        if "train" in data_config:
-            train_datasets.append(dataset)
-        # Test datasets
-        elif "test" in data_config:
-            test_dataset_key = f"{dataset_name}_test"
-            if test_dataset_key not in test_datasets:
-                test_datasets[test_dataset_key] = {}
-            test_datasets[test_dataset_key] = dataset
+        for dataset_type in ["train", "eval"]:
+            dataset = VnavDataset(
+                dataset_name=dataset_name,
+                dataset_type=dataset_type,
+                datasets_folder=f"{DATASETS_DIR}",
+                data_splits_folder=f"{PROJECT_ROOT_DIR}/data_splits",
+                image_size=config["image_size"],
+                pred_horizon=config["pred_horizon"],
+                context_size=config["context_size"],
+                max_goal_dist=config["max_goal_dist"],
+            )
+            # Train datasets
+            if dataset_type == "train":
+                train_datasets.append(dataset)
+            # Test datasets
+            elif dataset_type == "eval":
+                test_dataset_key = f"{dataset_name}_eval"
+                if test_dataset_key not in test_datasets:
+                    test_datasets[test_dataset_key] = {}
+                test_datasets[test_dataset_key] = dataset
     
     # Train dataloader
-    train_dataset = ConcatDataset(train_dataset)
+    train_dataset = ConcatDataset(train_datasets)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
@@ -68,11 +80,11 @@ def main(config):
         persistent_workers=True,
     )
 
-    # Test dataloader
-    test_dataloaders = {}
-    for test_dataset_key, test_dataset in test_datasets.items():
-        test_dataloaders[test_dataset_key] = DataLoader(
-            test_dataset,
+    # Eval dataloader
+    eval_dataloaders = {}
+    for eval_dataset_key, eval_dataset in test_datasets.items():
+        eval_dataloaders[eval_dataset_key] = DataLoader(
+            eval_dataset,
             batch_size=config["batch_size"],
             shuffle=True,
         )
@@ -85,16 +97,16 @@ def main(config):
 
     # Noise prediction network
     noise_pred_net = ConditionalUnet1D(
-        input_dim=3,
+        input_dim=2,
         global_cond_dim=config["encoding_size"],
         down_dims=config["down_dims"],
     )
 
     # Full Model
-    model = VectorNavigator(
-        vision_enc_net=visual_enc_net,
+    model = Vnav(
+        vision_encoder=visual_enc_net,
         noise_pred_net=noise_pred_net
-    )
+    ).to(device)
 
     # Noise Scheduler
     noise_scheduler = DDPMScheduler(
@@ -123,44 +135,40 @@ def main(config):
         total_epoch=config["warmup_epochs"],
         after_scheduler=lr_scheduler
     )
-    
-    # TODO: load the checkpoint if necessary
+
+    # Load the checkpoint if necessary
+    if "load_checkpoint" in config:
+        checkpoint_folder = os.path.join("logs", config["project_name"], config["load_checkpoint"]) 
+        print(f"Loading checkpoint from {checkpoint_folder}")
+        latest_path = os.path.join(checkpoint_folder, f"latest.pth")
+        latest_checkpoint = torch.load(latest_path)
+        
+        # Load the state dict
+        model.load_state_dict(latest_checkpoint)
 
     # Start training
-    current_epoch = 0
+    print("Start training!")
     train_eval_loop_vnav(
         model=model,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         noise_scheduler=noise_scheduler,
         train_dataloader=train_dataloader, 
-        test_dataloaders=test_dataloaders,
+        eval_dataloaders=eval_dataloaders,
         transform=transform,
         epochs=config["epochs"],
         device=device,
         project_folder=config["project_folder"],
         use_wandb=config["use_wandb"],
-        current_epoch=current_epoch,
+        current_epoch=0,
         eval_freq=config["eval_freq"],
     )
 
-
+    print("Training finished!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Visual Navigation Transformer")
-
-    # Project config
-    parser.add_argument(
-        "--config",
-        "-c",
-        default="config.yaml",
-        type=str,
-        help="Path to the config file",
-    )
-    args = parser.parse_args()
-
     # Load the config
-    with open(args.config, "r") as f:
+    with open(os.path.join(PROJECT_ROOT_DIR, "config.yaml"), "r") as f:
         config = yaml.safe_load(f)
 
     # Create project folder
@@ -169,6 +177,12 @@ if __name__ == "__main__":
     os.makedirs(config["project_folder"])
 
     # TODO: Wandb initialization
+    if config["use_wandb"]:
+        wandb.login()
+        wandb.init(
+            project=config["project_name"],
+        )
+        wandb.run.name = config["run_name"]
 
     # Run the trainning code
     main(config)

@@ -1,0 +1,33 @@
+# Log params
+project_name: vnav
+run_name: vnav_debug
+eval_freq: 1
+use_wandb: False
+
+# Train setup
+seed: 0
+batch_size: 128
+image_size: [256, 144] # width, height, 16:9
+stride: 5
+pred_horizon: 10
+context_size: 5
+min_goal_dist: 1
+max_goal_dist: 20
+
+lr: 1e-4
+epochs: 100
+warmup_epochs: 4
+num_workers: 24
+encoding_size: 256
+down_dims: [64, 128, 256]
+num_diffusion_iters: 1
+
+# Datasets
+datasets:
+  nadawalk_tokyo:
+    train:
+    eval:
+    end_slack: 0
+
+# Load checkpoint
+# load_checkpoint: "vnav_debug_2023_11_19_15_38_34"
