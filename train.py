@@ -56,8 +56,10 @@ def main(config):
                 datasets_folder=f"{DATASETS_DIR}",
                 data_splits_folder=f"{PROJECT_ROOT_DIR}/data_splits",
                 image_size=config["image_size"],
+                stride=config["stride"],
                 pred_horizon=config["pred_horizon"],
                 context_size=config["context_size"],
+                min_goal_dist=config["min_goal_dist"],
                 max_goal_dist=config["max_goal_dist"],
             )
             # Train datasets
@@ -100,6 +102,7 @@ def main(config):
         input_dim=2,
         global_cond_dim=config["encoding_size"],
         down_dims=config["down_dims"],
+        n_groups=config["pred_horizon"],
     )
 
     # Full Model

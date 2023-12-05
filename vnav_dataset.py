@@ -22,6 +22,7 @@ class VnavDataset(Dataset):
         stride: int,
         pred_horizon: int,
         context_size: int,
+        min_goal_dist: int,
         max_goal_dist: int,
     ):
         """
@@ -41,13 +42,14 @@ class VnavDataset(Dataset):
         self.stride = stride
         self.pred_horizon = pred_horizon
         self.context_size = context_size
+        self.min_goal_dist = min_goal_dist
         self.max_goal_dist = max_goal_dist
         self.index_to_data = self._build_index()
 
     def _build_index(self):
         samples_index = []
 
-        for traj_name in self.traj_names:
+        for traj_name in self.traj_names[:1]: # DEBUG: only use the first trajectory
             traj_data = self._get_trajectory(traj_name)
             # Skip if the trajectory doesn't exist
             if traj_data is None:
@@ -58,7 +60,8 @@ class VnavDataset(Dataset):
             end_time = traj_len - self.pred_horizon * self.stride
             for curr_time in range(begin_time, end_time):
                 max_goal_dist = min(self.max_goal_dist * self.stride, traj_len - curr_time - 1)
-                samples_index.append((traj_name, curr_time, max_goal_dist))
+                min_goal_dist = min(self.min_goal_dist * self.stride, max_goal_dist)
+                samples_index.append((traj_name, curr_time, min_goal_dist, max_goal_dist))
 
         return samples_index
 
@@ -67,7 +70,7 @@ class VnavDataset(Dataset):
         with open(image_path, "rb") as f:
             image_bytes = f.read() #<class 'bytes'>
         image = Image.open(io.BytesIO(image_bytes))
-        image = image.resize(self.image_size) # Resize the image
+        image = image.resize(self.image_size) # TODO: Resize the image #cost a lot of time
         image_tensor = TF.to_tensor(image) # Tensor of shape (W, H, 3)
         return image_tensor # Tensor of shape (3, W, H)
 
@@ -102,7 +105,7 @@ class VnavDataset(Dataset):
         actions = waypoints[1:]
         
         # Add the yaw actions to the actions
-        actions = np.concatenate([actions, yaw_actions[:, None]], axis=1)
+        # actions = np.concatenate([actions, yaw_actions[:, None]], axis=1)
 
         return actions, goal_pos
     
@@ -114,11 +117,16 @@ class VnavDataset(Dataset):
             traj_data = pickle.load(f)
         return traj_data
 
+    def _get_camera_intrinsics(self, trajectory_name):
+        with open(os.path.join(self.dataset_folder, "trajectories", trajectory_name, "intr_est.pkl"), "rb") as f:
+            intr_data = pickle.load(f)
+        return intr_data
+
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
-        current_file, curr_time, max_goal_dist = self.index_to_data[i]
+        current_file, curr_time, min_goal_dist, max_goal_dist = self.index_to_data[i]
 
         # Sample goal
-        goal_offset = np.random.randint(0, (max_goal_dist + 1)//self.stride)
+        goal_offset = np.random.randint(min_goal_dist//self.stride, (max_goal_dist + 1)//self.stride)
         goal_time = curr_time + goal_offset * self.stride
 
         # Load context images
@@ -149,7 +157,7 @@ class VnavDataset(Dataset):
         return len(self.index_to_data)
     
 
-# Test the dataset
+# Test the datasetgazppdrgb rtc c
 if __name__ == "__main__":
     vnav_dataset = VnavDataset(
         dataset_name="nadawalk_tokyo",
@@ -158,22 +166,23 @@ if __name__ == "__main__":
         data_splits_folder="/home/caoruixiang/nomad_caorx/vector-navigator/data_splits",
         image_size=(128, 72),
         stride=5,
-        pred_horizon=20,
+        pred_horizon=10,
         context_size=5,
         min_goal_dist=5,
-        max_goal_dist=20,
+        max_goal_dist=20
     )
     # print(len(vnav_dataset))
 
     for i in range(100):
         # Test: take a sample from the dataset
-        sample = vnav_dataset[np.random.randint(0, len(vnav_dataset))]
-        # sample = vnav_dataset[300]
+        rand_index = np.random.randint(0, len(vnav_dataset))
+        print(f"rand_index: {rand_index}")
+        sample = vnav_dataset[rand_index]
 
         # slice the image list into individual images
         obs_images = sample[0]
         obs_images = torch.split(obs_images, 3, dim=0)
-        sample_image = obs_images[0]
+        sample_image = obs_images[-1]
 
         import matplotlib.pyplot as plt
         # Visualize the image in subplot 121
@@ -185,7 +194,10 @@ if __name__ == "__main__":
 
         # Visualize the actions
         actions = sample[2]
-        actions = np.concatenate([np.array([[0, 0, 0]]), actions], axis=0)
+        if actions[0].shape == 3:
+            actions = np.concatenate([np.array([[0, 0, 0]]), actions], axis=0)
+        else:
+            actions = np.concatenate([np.array([[0, 0]]), actions], axis=0)
 
         axs[1].set_title('Trajectory')
         axs[1].set_xlabel('x(m)')
@@ -209,14 +221,15 @@ if __name__ == "__main__":
             'b-'
             )
 
-        # Plot the yaw angle
-        vis_stride = 2
-        axs[1].quiver(
-            actions[:,0][::vis_stride], 
-            actions[:,1][::vis_stride], 
-            np.sin(actions[:,2][::vis_stride]), 
-            np.cos(actions[:,2][::vis_stride]), 
-            color='g', 
-            width=0.005)
+        if int(actions[0].shape[0]) == 3:
+            # Plot the yaw angle
+            vis_stride = 2
+            axs[1].quiver(
+                actions[:,0][::vis_stride], 
+                actions[:,1][::vis_stride], 
+                np.sin(actions[:,2][::vis_stride]), 
+                np.cos(actions[:,2][::vis_stride]), 
+                color='g', 
+                width=0.005)
 
         plt.show()

@@ -88,6 +88,7 @@ def train_eval_loop_vnav(
                     transform=transform,
                     device=device,
                     noise_scheduler=noise_scheduler,
+                    project_folder=project_folder,
                     epoch=epoch,
                     use_wandb=use_wandb,
                 )

@@ -6,16 +6,16 @@ use_wandb: False
 
 # Train setup
 seed: 0
-batch_size: 128
-image_size: [256, 144] # width, height, 16:9
+batch_size: 32
+image_size: [128, 72] # width, height, 16:9
 stride: 5
-pred_horizon: 10
+pred_horizon: 16
 context_size: 5
-min_goal_dist: 1
-max_goal_dist: 20
+min_goal_dist: 5
+max_goal_dist: 32
 
 lr: 1e-4
-epochs: 100
+epochs: 2 # 100
 warmup_epochs: 4
 num_workers: 24
 encoding_size: 256
