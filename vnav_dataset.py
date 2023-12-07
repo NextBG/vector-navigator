@@ -6,6 +6,8 @@ import yaml
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 import time
+import lmdb
+from tqdm import tqdm
 
 import torch
 from torch.utils.data import Dataset
@@ -24,12 +26,14 @@ class VnavDataset(Dataset):
         context_size: int,
         min_goal_dist: int,
         max_goal_dist: int,
+        max_traj_len: int = 200, # -1 means use all trajectories
     ):
         """
         Main Vec Nav dataset class
         """
         self.dataset_name = dataset_name
         self.dataset_folder = os.path.join(datasets_folder, dataset_name)
+        self.data_splits_folder = os.path.join(data_splits_folder, dataset_name, dataset_type)
         traj_names_file = os.path.join(data_splits_folder, dataset_name, dataset_type, "traj_names.txt")
 
         with open(traj_names_file, "r") as f:
@@ -44,17 +48,28 @@ class VnavDataset(Dataset):
         self.context_size = context_size
         self.min_goal_dist = min_goal_dist
         self.max_goal_dist = max_goal_dist
-        self.index_to_data = self._build_index()
+        self.max_traj_len = max_traj_len
+
+        self.index_to_data, self.images_index = self._build_index()
+
+        self._image_cache = {}
+        self._build_caches()
 
     def _build_index(self):
         samples_index = []
-
-        for traj_name in self.traj_names[:1]: # DEBUG: only use the first trajectory
+        images_index = []
+        traj_len_to_use = max(self.max_traj_len, len(self.traj_names))
+        for traj_name in self.traj_names[:traj_len_to_use]:
             traj_data = self._get_trajectory(traj_name)
             # Skip if the trajectory doesn't exist
             if traj_data is None:
+                print(f"Trajectory {traj_name} doesn't exist, skipping...")
                 continue
+
             traj_len = len(traj_data["positions"])
+
+            for image_time in range(0, traj_len):
+                images_index.append((traj_name, image_time))
 
             begin_time = self.context_size * self.stride
             end_time = traj_len - self.pred_horizon * self.stride
@@ -63,16 +78,52 @@ class VnavDataset(Dataset):
                 min_goal_dist = min(self.min_goal_dist * self.stride, max_goal_dist)
                 samples_index.append((traj_name, curr_time, min_goal_dist, max_goal_dist))
 
-        return samples_index
+        return samples_index, images_index
+    
+    def _build_caches(self):
+        """
+        Build caches for the images for faster loading
+        """
+        cache_file = os.path.join(self.data_splits_folder, "cache.lmdb")
 
-    def _load_image(self, trajectory_name, time):
-        image_path = os.path.join(self.dataset_folder, "trajectories", trajectory_name, "frames", f"{time:06d}.png")
-        with open(image_path, "rb") as f:
-            image_bytes = f.read() #<class 'bytes'>
-        image = Image.open(io.BytesIO(image_bytes))
-        image = image.resize(self.image_size) # TODO: Resize the image #cost a lot of time
-        image_tensor = TF.to_tensor(image) # Tensor of shape (W, H, 3)
-        return image_tensor # Tensor of shape (3, W, H)
+        # Create the cache file if it doesn't exist
+        if os.path.exists(cache_file):
+            print("Cache file exists, skipping cache building...")
+        else:
+            with lmdb.open(cache_file, map_size=2**40) as image_cache:
+                with image_cache.begin(write=True) as txn:
+                    for traj_name, image_time in tqdm(self.images_index, desc="Building cache"):
+                        image_path = os.path.join(
+                            self.dataset_folder,
+                            "trajectories",
+                            traj_name,
+                            "frames",
+                            f"{image_time:06d}.png"
+                        )
+                        with open(image_path, "rb") as f:
+                            image_bytes = f.read()
+                            image = Image.open(io.BytesIO(image_bytes))
+                            image = image.resize(self.image_size)
+                            # txn.put(f"{self.dataset_name}_{traj_name}_{image_time}".encode(), image_bytes)
+
+                            with io.BytesIO() as output:
+                                image.save(output, format="PNG")
+                                compressed_image_bytes = output.getvalue()
+
+                            key = f"{self.dataset_name}_{traj_name}_{image_time}".encode()
+                            txn.put(key, compressed_image_bytes)
+
+        self._image_cache: lmdb.Environment = lmdb.open(cache_file, readonly=True)
+
+    def _load_image(self, traj_name, time):
+        with self._image_cache.begin() as txn:
+            image_buffer = txn.get(f"{self.dataset_name}_{traj_name}_{time}".encode())
+            image_bytes = io.BytesIO(bytes(image_buffer))
+        image = Image.open(image_bytes)
+        # image = image.resize(self.image_size)
+        image_tensor = TF.to_tensor(image)
+
+        return image_tensor
 
     def _to_local_coords(self, points, origin, yaw0):
         """
@@ -159,6 +210,7 @@ class VnavDataset(Dataset):
 
 # Test the datasetgazppdrgb rtc c
 if __name__ == "__main__":
+    
     vnav_dataset = VnavDataset(
         dataset_name="nadawalk_tokyo",
         dataset_type="train",
@@ -171,12 +223,10 @@ if __name__ == "__main__":
         min_goal_dist=5,
         max_goal_dist=20
     )
-    # print(len(vnav_dataset))
 
     for i in range(100):
         # Test: take a sample from the dataset
         rand_index = np.random.randint(0, len(vnav_dataset))
-        print(f"rand_index: {rand_index}")
         sample = vnav_dataset[rand_index]
 
         # slice the image list into individual images

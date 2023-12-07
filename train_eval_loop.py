@@ -18,15 +18,6 @@ from diffusers.training_utils import EMAModel
 
 from utils import *
 
-
-# LOAD DATA CONFIG
-with open(os.path.join(os.path.dirname(__file__), "datasets/data_config.yaml"), "r") as f:
-    data_config = yaml.safe_load(f)
-# POPULATE ACTION STATS
-ACTION_STATS = {}
-for key in data_config['action_stats']:
-    ACTION_STATS[key] = np.array(data_config['action_stats'][key])
-
 def train_eval_loop_vnav(
     model: nn.Module,
     optimizer: AdamW,
@@ -35,11 +26,12 @@ def train_eval_loop_vnav(
     train_dataloader: DataLoader,
     eval_dataloaders: Dict[str, DataLoader],
     transform: transforms,
+    action_stats: np.ndarray,
     epochs: int,
     device: torch.device,
     project_folder: str,
     current_epoch: int = 0,
-    eval_freq: int = 1,
+    eval_interval: int = 1,
     use_wandb: bool = True,
 ):
     # Prepare the EMA(Exponential Moving Average) model
@@ -47,12 +39,15 @@ def train_eval_loop_vnav(
 
     # Train Loop
     for epoch in range(current_epoch, current_epoch+epochs):
+        print(f">>> Epoch {epoch}/{current_epoch+epochs} <<<")
+
         train_vnav(
             model=model,
             ema_model=ema_model,
             optimizer=optimizer,
             dataloader=train_dataloader,
             transform=transform,
+            action_stats=action_stats,
             device=device,
             noise_scheduler=noise_scheduler,
             use_wandb=use_wandb,
@@ -80,12 +75,13 @@ def train_eval_loop_vnav(
         torch.save(lr_scheduler.state_dict(), scheduler_latest_path)
 
         # Evaluation
-        if (epoch+1)%eval_freq == 0:
+        if (epoch+1)%eval_interval == 0:
             for eval_dataset_key in eval_dataloaders:
                 evaluate_vnav(
                     ema_model=ema_model,
                     dataloader=eval_dataloaders[eval_dataset_key],
                     transform=transform,
+                    action_stats=action_stats,
                     device=device,
                     noise_scheduler=noise_scheduler,
                     project_folder=project_folder,
@@ -102,6 +98,7 @@ def train_vnav(
     optimizer: AdamW,
     dataloader: DataLoader,
     transform: transforms,
+    action_stats: np.ndarray,
     device: torch.device,
     noise_scheduler: DDPMScheduler,
     use_wandb: bool = False,
@@ -110,7 +107,7 @@ def train_vnav(
 
     # TODO: 23/12/04: Improve the performance of the training loop, maybe the dataloader is the bottleneck
 
-    for i, data in tqdm.tqdm(enumerate(dataloader), desc="Batches", total=len(dataloader)):
+    for i, data in tqdm.tqdm(enumerate(dataloader), desc="Training batches", total=len(dataloader)):
         # Print the load time
         (obs_image, goal_vec, actions) = data
 
@@ -133,7 +130,7 @@ def train_vnav(
             )
         
         deltas = get_delta(actions) # Get delta between action and last action
-        n_deltas = normalize_data(deltas, ACTION_STATS) # Normalize the deltas
+        n_deltas = normalize_data(deltas, action_stats) # Normalize the deltas
         n_action = n_deltas.to(device)
 
         # Sample noise to add to actions
@@ -167,11 +164,13 @@ def evaluate_vnav(
         ema_model: EMAModel,
         dataloader: DataLoader,
         transform: transforms,
+        action_stats: np.ndarray,
         device: torch.device,
         noise_scheduler: DDPMScheduler,
         epoch: int,
         project_folder: str,
-        eval_fraction: float= 0.25,
+        eval_fraction: float= 0.1,
+        visualization_interval: int = 3,
         use_wandb: bool = False,
 ):
     ema_model = ema_model.averaged_model
@@ -180,7 +179,7 @@ def evaluate_vnav(
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
     with torch.no_grad():
-        for i, data in enumerate(itertools.islice(dataloader, num_batches)):
+        for i, data in tqdm.tqdm(enumerate(itertools.islice(dataloader, num_batches)), desc="Evaluation batches", total=num_batches):
             (obs_image, goal_vec, actions) = data
             actions = actions.to(device)
 
@@ -204,7 +203,7 @@ def evaluate_vnav(
             
             # Actions
             deltas = get_delta(actions)
-            n_deltas = normalize_data(deltas, ACTION_STATS)
+            n_deltas = normalize_data(deltas, action_stats)
 
             # Sample noise to add to actions
             noise = torch.randn(n_deltas.shape, device=device)
@@ -224,6 +223,10 @@ def evaluate_vnav(
             # Total loss = MSE between predicted noise and noise
             diffusion_loss = F.mse_loss(noise_pred, noise)
 
+            # log the loss to wandb
+            if use_wandb:
+                wandb.log({"Diffusion loss": diffusion_loss.item()})
+
             sampled_actions = sample_actions(
                 ema_model,
                 noise_scheduler,
@@ -231,21 +234,19 @@ def evaluate_vnav(
                 batch_goal_vecs[0],
                 pred_horizon=len(actions[0]),
                 action_dim=2,
-                action_stats=ACTION_STATS,
+                action_stats=action_stats,
                 num_samples=10,
                 device=device,
             )
 
-            visualize_obs_action( # TODO: add the ground truth to the plot
-                obs_img=obs_images[0][0],
-                sampled_actions=sampled_actions,
-                ground_truth_actions=actions[0],
-                goal_vec=goal_vec[0],
-                epoch=epoch,
-                project_folder=project_folder,
-                use_wandb=use_wandb,
-            )
-
-            # Log the loss to wandb
-            if use_wandb:
-                wandb.log({"Eval loss": diffusion_loss.item()})
+            if i%visualization_interval == 0:
+                visualize_obs_action( # TODO: add the ground truth to the plot
+                    batch_idx=i,
+                    obs_img=obs_images[0][-1],
+                    sampled_actions=sampled_actions,
+                    ground_truth_actions=actions[0],
+                    goal_vec=goal_vec[0],
+                    epoch=epoch,
+                    project_folder=project_folder,
+                    use_wandb=use_wandb,
+                )

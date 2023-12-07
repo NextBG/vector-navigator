@@ -32,23 +32,27 @@ def get_delta(actions: torch.Tensor):
 
     return torch.from_numpy(delta).float().to(device)
 
-def normalize_data(data: torch.Tensor, stats: Dict[str, np.ndarray]):
+def normalize_data(data: torch.Tensor, stats: np.ndarray):
     device = data.device
     data = data.detach().cpu().numpy()
 
+    x_min, x_max, y_min, y_max = stats
+
     # nomalize to [0,1]
-    ndata = (data - stats['min']) / (stats['max'] - stats['min'])
+    ndata = (data - np.array([x_min, y_min])) / (np.array([x_max, y_max]) - np.array([x_min, y_min]))
     # normalize to [-1, 1]
     ndata = ndata * 2 - 1
 
     return torch.from_numpy(ndata).float().to(device)
 
-def unnormalize_data(ndata: torch.Tensor, stats: Dict[str, np.ndarray]):
+def unnormalize_data(ndata: torch.Tensor, stats: np.ndarray):
     device = ndata.device
     ndata = ndata.detach().cpu().numpy()
 
+    x_min, x_max, y_min, y_max = stats
+
     ndata = (ndata + 1) / 2
-    data = ndata * (stats['max'] - stats['min']) + stats['min']
+    data = ndata * (np.array([x_max, y_max]) - np.array([x_min, y_min])) + np.array([x_min, y_min])
 
     return torch.from_numpy(data).to(device)
 
@@ -104,6 +108,7 @@ def sample_actions(
     return actions
 
 def visualize_obs_action(
+        batch_idx: int,
         obs_img: torch.Tensor,
         sampled_actions: torch.Tensor,
         ground_truth_actions: torch.Tensor,
@@ -122,10 +127,16 @@ def visualize_obs_action(
     if not os.path.exists(visualize_path):
         os.makedirs(visualize_path)
 
-    # Detaching from any computation graph, moving to CPU, and converting to NumPy array
+    ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
+    ground_truth_actions = ground_truth_actions.reshape(-1, 2)
+    ground_truth_actions = np.concatenate([np.zeros((1,2)), ground_truth_actions], axis=0) # [pred_horizon+1, 2]
+    gt_x = ground_truth_actions[:, 0]
+    gt_y = ground_truth_actions[:, 1]
+
     sampled_actions = sampled_actions.detach().cpu().numpy() # [num_samples, pred_horizon, 2]
     sampled_actions = np.concatenate([np.zeros((sampled_actions.shape[0], 1, sampled_actions.shape[-1])), sampled_actions], axis=1) # [num_samples, pred_horizon+1, 2]
 
+    goal_vec = goal_vec.detach().cpu().numpy()
 
     fig = plt.figure()
     # Plot the first observation image
@@ -138,28 +149,23 @@ def visualize_obs_action(
     # plot all sampled action trajectories in a single plot
     ax = fig.add_subplot(122)
     ax.grid()
-    ax.set_xlabel("y")
-    ax.set_ylabel("x")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
     ax.set_title("Actions")
+
     for i in range(sampled_actions.shape[0]):
-        x = sampled_actions[i, :, 0]
-        y = sampled_actions[i, :, 1]
-        ax.plot(y, x, "r-o", alpha=0.1, markersize=3)
+            x = sampled_actions[i, :, 0]
+            y = sampled_actions[i, :, 1]
+            ax.plot(x, y, "r-o", alpha=0.1, markersize=3)
 
     # Plot the ground truth actions
-    ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
-    ground_truth_actions = ground_truth_actions.reshape(-1, 2)
-    ground_truth_actions = np.concatenate([np.zeros((1,2)), ground_truth_actions], axis=0)
-    x = ground_truth_actions[:, 0]
-    y = ground_truth_actions[:, 1]
-    ax.plot(y, x, "g-o", markersize=5)
+    ax.plot(gt_x, gt_y, "g-o", markersize=5)
 
     # plot the goal vector
-    goal_vec = goal_vec.detach().cpu().numpy()
-    ax.plot(goal_vec[1], goal_vec[0], "b-x", markersize=10)
+    ax.plot(goal_vec[0], goal_vec[1], "b-x", markersize=10)
 
     # Save the plot
-    save_path = os.path.join(visualize_path, "actions.png")
+    save_path = os.path.join(visualize_path, f"{batch_idx}.png")
     plt.savefig(save_path)
     plt.close(fig)
 

@@ -25,8 +25,7 @@ from vnav_dataset import VnavDataset
 
 # Dataset
 PROJECT_ROOT_DIR = "/home/caoruixiang/nomad_caorx/vector-navigator"
-DATASETS_DIR = "/home/caoruixiang/vecnav_dataset/mount_point/datasets" # HACK: hardcode the dataset path
-    
+DATASETS_DIR = "/home/caoruixiang/vecnav_dataset/mount_point/datasets"
 
 def main(config):
     # Device
@@ -61,6 +60,7 @@ def main(config):
                 context_size=config["context_size"],
                 min_goal_dist=config["min_goal_dist"],
                 max_goal_dist=config["max_goal_dist"],
+                max_traj_len=config["max_traj_len"],
             )
             # Train datasets
             if dataset_type == "train":
@@ -159,12 +159,13 @@ def main(config):
         train_dataloader=train_dataloader, 
         eval_dataloaders=eval_dataloaders,
         transform=transform,
+        action_stats=config["action_stats"],
         epochs=config["epochs"],
         device=device,
         project_folder=config["project_folder"],
         use_wandb=config["use_wandb"],
         current_epoch=0,
-        eval_freq=config["eval_freq"],
+        eval_interval=config["eval_interval"],
     )
 
     print("Training finished!")
@@ -186,6 +187,9 @@ if __name__ == "__main__":
             project=config["project_name"],
         )
         wandb.run.name = config["run_name"]
+
+        if wandb.run:
+            wandb.config.update(config)
 
     # Run the trainning code
     main(config)
