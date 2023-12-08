@@ -58,7 +58,7 @@ class VnavDataset(Dataset):
     def _build_index(self):
         samples_index = []
         images_index = []
-        traj_len_to_use = max(self.max_traj_len, len(self.traj_names))
+        traj_len_to_use = min(self.max_traj_len, len(self.traj_names))
         for traj_name in self.traj_names[:traj_len_to_use]:
             traj_data = self._get_trajectory(traj_name)
             # Skip if the trajectory doesn't exist
@@ -87,9 +87,7 @@ class VnavDataset(Dataset):
         cache_file = os.path.join(self.data_splits_folder, "cache.lmdb")
 
         # Create the cache file if it doesn't exist
-        if os.path.exists(cache_file):
-            print("Cache file exists, skipping cache building...")
-        else:
+        if not os.path.exists(cache_file):
             with lmdb.open(cache_file, map_size=2**40) as image_cache:
                 with image_cache.begin(write=True) as txn:
                     for traj_name, image_time in tqdm(self.images_index, desc="Building cache"):

@@ -28,12 +28,13 @@ def train_eval_loop_vnav(
     transform: transforms,
     action_stats: np.ndarray,
     epochs: int,
-    device: torch.device,
+    device,
     project_folder: str,
     current_epoch: int = 0,
     eval_interval: int = 1,
     use_wandb: bool = True,
 ):
+
     # Prepare the EMA(Exponential Moving Average) model
     ema_model = EMAModel(model=model, power=0.75)
 
@@ -50,6 +51,7 @@ def train_eval_loop_vnav(
             action_stats=action_stats,
             device=device,
             noise_scheduler=noise_scheduler,
+            epoch=epoch,
             use_wandb=use_wandb,
         )
         lr_scheduler.step()
@@ -60,17 +62,17 @@ def train_eval_loop_vnav(
         latest_path = os.path.join(project_folder, f"latest.pth")
         optimizer_latest_path = os.path.join(project_folder, f"optimizer_latest.pth")
         scheduler_latest_path = os.path.join(project_folder, f"scheduler_latest.pth")
-
+        
         # Save the EMA model
         torch.save(ema_model.averaged_model.state_dict(), ema_numbered_path)
-
+        
         # Save the model
         torch.save(model.state_dict(), numbered_path)
         torch.save(model.state_dict(), latest_path)
-
+        
         # Save the optimizer
         torch.save(optimizer.state_dict(), optimizer_latest_path)
-
+        
         # Save the scheduler
         torch.save(lr_scheduler.state_dict(), scheduler_latest_path)
 
@@ -99,20 +101,24 @@ def train_vnav(
     dataloader: DataLoader,
     transform: transforms,
     action_stats: np.ndarray,
-    device: torch.device,
+    device,
     noise_scheduler: DDPMScheduler,
+    epoch: int,
     use_wandb: bool = False,
 ):
     model.train()
 
-    # TODO: 23/12/04: Improve the performance of the training loop, maybe the dataloader is the bottleneck
+    # check if using parallel training
+    if type(device) == torch.device:
+        use_ddp = False
+    else:
+        dataloader.sampler.set_epoch(epoch)
+        use_ddp = True
 
-    for i, data in tqdm.tqdm(enumerate(dataloader), desc="Training batches", total=len(dataloader)):
+    # TODO: 23/12/04: Improve the performance of the training loop, maybe the dataloader is the bottleneck
+    for i, data in tqdm.tqdm(enumerate(dataloader), desc="Training batches", total=len(dataloader), disable=(use_ddp and device != 0)):
         # Print the load time
         (obs_image, goal_vec, actions) = data
-
-        # Batch size
-        BS = actions.shape[0]
 
         # Observation images
         obs_images = torch.split(obs_image, 3, dim=1) # Split the image pack into individual images
@@ -139,7 +145,7 @@ def train_vnav(
         # Sample a diffusion iteration for each data point
         timesteps = torch.randint(
             0, noise_scheduler.config.num_train_timesteps,
-            (BS,), device=device
+            (actions.shape[0],), device=device
         ).long()
 
         # Add noise to the clean images according to the noise magnitude at each diffusion iteration
@@ -165,7 +171,7 @@ def evaluate_vnav(
         dataloader: DataLoader,
         transform: transforms,
         action_stats: np.ndarray,
-        device: torch.device,
+        device,
         noise_scheduler: DDPMScheduler,
         epoch: int,
         project_folder: str,
@@ -173,13 +179,26 @@ def evaluate_vnav(
         visualization_interval: int = 3,
         use_wandb: bool = False,
 ):
+    # check if using parallel training
+    if type(device) == torch.device:
+        use_ddp = False
+    else:
+        dataloader.sampler.set_epoch(epoch)
+        use_ddp = True
+
     ema_model = ema_model.averaged_model
     ema_model.eval()
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
     with torch.no_grad():
-        for i, data in tqdm.tqdm(enumerate(itertools.islice(dataloader, num_batches)), desc="Evaluation batches", total=num_batches):
+        for i, data in tqdm.tqdm(
+            enumerate(itertools.islice(dataloader, num_batches)), 
+            desc="Evaluation batches", 
+            total=num_batches,
+            disable=(use_ddp and device != 0),
+            ):
+
             (obs_image, goal_vec, actions) = data
             actions = actions.to(device)
 

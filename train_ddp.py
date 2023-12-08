@@ -12,6 +12,11 @@ import torch.backends.cudnn as cudnn
 from torchvision import transforms
 from torch.utils.data import DataLoader, ConcatDataset
 
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
 from warmup_scheduler import GradualWarmupScheduler
 from models import Vnav, VisionEncoder
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
@@ -26,8 +31,12 @@ from utils import *
     Train the model
 '''
 
-def main(config):
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+def main(gpu_rank, config):
+    # Initialize the process group
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    dist.init_process_group(backend="nccl", rank=gpu_rank, world_size=config["num_gpus"])
+    torch.cuda.set_device(gpu_rank)
 
     # Seed
     if "seed" in config:
@@ -75,6 +84,7 @@ def main(config):
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
+        sampler=DistributedSampler(train_dataset),
     )
 
     # Eval dataloader
@@ -83,6 +93,7 @@ def main(config):
         eval_dataloaders[eval_dataset_key] = DataLoader(
             eval_dataset,
             batch_size=config["batch_size"],
+            sampler=DistributedSampler(eval_dataset),
         )
     
     # Vision encoder
@@ -103,7 +114,10 @@ def main(config):
     model = Vnav(
         vision_encoder=visual_enc_net,
         noise_pred_net=noise_pred_net
-    ).to(device)
+    ).to(gpu_rank)
+
+    # Distributed Data Parallel
+    ddp_model = DDP(model, device_ids=[gpu_rank], find_unused_parameters=True)
 
     # Noise Scheduler
     noise_scheduler = DDPMScheduler(
@@ -115,7 +129,7 @@ def main(config):
 
     # Optimizer
     optimizer = AdamW(
-        model.parameters(), 
+        ddp_model.parameters(), 
         lr=float(config["lr"])
     )
 
@@ -141,13 +155,14 @@ def main(config):
         latest_checkpoint = torch.load(latest_path)
         
         # Load the state dict
-        model.load_state_dict(latest_checkpoint)
+        ddp_model.load_state_dict(latest_checkpoint)
 
     # Start training
-    print("Start training!")
+    if gpu_rank == 0:
+        print("Start training!")
     
     train_eval_loop_vnav(
-        model=model,
+        model=ddp_model,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         noise_scheduler=noise_scheduler,
@@ -156,14 +171,18 @@ def main(config):
         transform=transform,
         action_stats=config["action_stats"],
         epochs=config["epochs"],
-        device=device,
+        device=gpu_rank,
         project_folder=config["project_log_folder"],
         use_wandb=config["use_wandb"],
         current_epoch=0,
         eval_interval=config["eval_interval"],
     )
 
-    print("Training finished!")
+    # Clean up
+    dist.destroy_process_group()
+
+    if gpu_rank == 0:
+        print("Training finished!")
 
 if __name__ == "__main__":
     # Get path of current folder
@@ -190,5 +209,13 @@ if __name__ == "__main__":
         if wandb.run:
             wandb.config.update(config)
 
-    # Start training
-    main(config)
+    # Distributed training
+    world_size = torch.cuda.device_count()
+    config["num_gpus"] = world_size
+
+    # Run the trainning code
+    mp.spawn(
+        main,
+        args=(config, ),
+        nprocs=world_size,
+    )

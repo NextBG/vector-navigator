@@ -6,6 +6,7 @@ from typing import List, Optional, Dict
 from prettytable import PrettyTable
 import tqdm
 import itertools
+import matplotlib.pyplot as plt
 
 from vint_train.visualizing.visualize_utils import to_numpy
 from vint_train.training.logger import Logger
@@ -19,7 +20,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import torchvision.transforms.functional as TF
-import matplotlib.pyplot as plt
 
 
 # Get delta between action and last action
@@ -63,7 +63,7 @@ def count_parameters(model: nn.Module):
         if not parameter.requires_grad: continue
         params = parameter.numel()
         table.add_row([name, params])
-        total_params+=params
+        total_params = total_params + params
     # print(table)
     print(f"Total Trainable Params: {total_params/1e6:.2f}M")
     return total_params
