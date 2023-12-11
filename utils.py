@@ -1,7 +1,7 @@
 import wandb
 import os
-import numpy as np
 import yaml
+import numpy as np
 from typing import List, Optional, Dict
 from prettytable import PrettyTable
 import tqdm
@@ -22,39 +22,33 @@ from torchvision import transforms
 import torchvision.transforms.functional as TF
 
 
-# Get delta between action and last action
-def get_delta(actions: torch.Tensor):
-    device = actions.device
-    actions = actions.detach().cpu().numpy()
+def get_delta(actions: torch.Tensor): # shape: [BS, pred_horizon, 2]
+    padded_actions = F.pad(actions, (0, 0, 1, 0), mode="constant", value=0) # [BS, pred_horizon+1, 2]
+    delta = padded_actions[:,1:] - padded_actions[:,:-1]
 
-    ex_actions = np.concatenate([np.zeros((actions.shape[0],1,actions.shape[-1])), actions], axis=1)
-    delta = ex_actions[:,1:] - ex_actions[:,:-1]
+    return delta
 
-    return torch.from_numpy(delta).float().to(device)
-
-def normalize_data(data: torch.Tensor, stats: np.ndarray):
-    device = data.device
-    data = data.detach().cpu().numpy()
-
-    x_min, x_max, y_min, y_max = stats
+def normalize_data(data: torch.Tensor, stats: list):
+    data_min, data_max = stats
 
     # nomalize to [0,1]
-    ndata = (data - np.array([x_min, y_min])) / (np.array([x_max, y_max]) - np.array([x_min, y_min]))
+    ndata = (data - data_min) / (data_max - data_min)
+
     # normalize to [-1, 1]
     ndata = ndata * 2 - 1
 
-    return torch.from_numpy(ndata).float().to(device)
+    return ndata
 
-def unnormalize_data(ndata: torch.Tensor, stats: np.ndarray):
-    device = ndata.device
-    ndata = ndata.detach().cpu().numpy()
+def unnormalize_data(ndata: torch.Tensor, stats: list):
+    data_min, data_max = stats
 
-    x_min, x_max, y_min, y_max = stats
-
+    # unnormalize from [-1, 1]
     ndata = (ndata + 1) / 2
-    data = ndata * (np.array([x_max, y_max]) - np.array([x_min, y_min])) + np.array([x_min, y_min])
 
-    return torch.from_numpy(data).to(device)
+    # unnormalize from [0, 1]
+    data = ndata * (data_max - data_min) + data_min
+
+    return data
 
 def count_parameters(model: nn.Module):
     table = PrettyTable(["Modules", "Parameters"])
@@ -115,8 +109,10 @@ def visualize_obs_action(
         goal_vec: torch.Tensor,
         epoch:int,
         project_folder: str,
+        device: int,
         use_wandb: bool = False,
         ):
+
     # Create a folder to save the visualizations
     visualize_path = os.path.join(
         project_folder,
@@ -124,8 +120,7 @@ def visualize_obs_action(
         f"epoch_{epoch}",
         "action_sampling_prediction",
     )
-    if not os.path.exists(visualize_path):
-        os.makedirs(visualize_path)
+    os.makedirs(visualize_path, exist_ok=True)
 
     ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
     ground_truth_actions = ground_truth_actions.reshape(-1, 2)
@@ -165,10 +160,10 @@ def visualize_obs_action(
     ax.plot(goal_vec[0], goal_vec[1], "b-x", markersize=10)
 
     # Save the plot
-    save_path = os.path.join(visualize_path, f"{batch_idx}.png")
+    save_path = os.path.join(visualize_path, f"{device}_{batch_idx}.png")
     plt.savefig(save_path)
     plt.close(fig)
 
     # Log the plot to W&B
-    if use_wandb:
+    if use_wandb and (device == torch.device("cuda") or device == 0):
         wandb.log({"Eval actions": wandb.Image(save_path)})

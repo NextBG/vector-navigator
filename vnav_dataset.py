@@ -50,14 +50,13 @@ class VnavDataset(Dataset):
         self.max_goal_dist = max_goal_dist
         self.max_traj_len = max_traj_len
 
-        self.index_to_data, self.images_index = self._build_index()
+        self.index_to_data = self._build_index()
 
-        self._image_cache = {}
-        self._build_caches()
+        self.cache_file = os.path.join(self.dataset_folder, f"cache_{image_size[0]}x{image_size[1]}.lmdb")
+        self.lmdb_env = None
 
     def _build_index(self):
         samples_index = []
-        images_index = []
         traj_len_to_use = min(self.max_traj_len, len(self.traj_names))
         for traj_name in self.traj_names[:traj_len_to_use]:
             traj_data = self._get_trajectory(traj_name)
@@ -68,9 +67,6 @@ class VnavDataset(Dataset):
 
             traj_len = len(traj_data["positions"])
 
-            for image_time in range(0, traj_len):
-                images_index.append((traj_name, image_time))
-
             begin_time = self.context_size * self.stride
             end_time = traj_len - self.pred_horizon * self.stride
             for curr_time in range(begin_time, end_time):
@@ -78,47 +74,16 @@ class VnavDataset(Dataset):
                 min_goal_dist = min(self.min_goal_dist * self.stride, max_goal_dist)
                 samples_index.append((traj_name, curr_time, min_goal_dist, max_goal_dist))
 
-        return samples_index, images_index
-    
-    def _build_caches(self):
-        """
-        Build caches for the images for faster loading
-        """
-        cache_file = os.path.join(self.data_splits_folder, "cache.lmdb")
-
-        # Create the cache file if it doesn't exist
-        if not os.path.exists(cache_file):
-            with lmdb.open(cache_file, map_size=2**40) as image_cache:
-                with image_cache.begin(write=True) as txn:
-                    for traj_name, image_time in tqdm(self.images_index, desc="Building cache"):
-                        image_path = os.path.join(
-                            self.dataset_folder,
-                            "trajectories",
-                            traj_name,
-                            "frames",
-                            f"{image_time:06d}.png"
-                        )
-                        with open(image_path, "rb") as f:
-                            image_bytes = f.read()
-                            image = Image.open(io.BytesIO(image_bytes))
-                            image = image.resize(self.image_size)
-                            # txn.put(f"{self.dataset_name}_{traj_name}_{image_time}".encode(), image_bytes)
-
-                            with io.BytesIO() as output:
-                                image.save(output, format="PNG")
-                                compressed_image_bytes = output.getvalue()
-
-                            key = f"{self.dataset_name}_{traj_name}_{image_time}".encode()
-                            txn.put(key, compressed_image_bytes)
-
-        self._image_cache: lmdb.Environment = lmdb.open(cache_file, readonly=True)
+        return samples_index
 
     def _load_image(self, traj_name, time):
-        with self._image_cache.begin() as txn:
-            image_buffer = txn.get(f"{self.dataset_name}_{traj_name}_{time}".encode())
+        if self.lmdb_env is None:
+            self.lmdb_env = lmdb.open(self.cache_file, map_size=2**40, readonly=True) # 1TB cache
+        with self.lmdb_env.begin() as txn:
+            image_buffer = txn.get(f"{traj_name}_{time:06d}".encode())
             image_bytes = io.BytesIO(bytes(image_buffer))
+
         image = Image.open(image_bytes)
-        # image = image.resize(self.image_size)
         image_tensor = TF.to_tensor(image)
 
         return image_tensor
@@ -205,8 +170,12 @@ class VnavDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index_to_data)
     
+    def __del__(self):
+        if self.lmdb_env is not None:
+            self.lmdb_env.close()
+            self.lmdb_env = None
 
-# Test the datasetgazppdrgb rtc c
+# Test the dataset
 if __name__ == "__main__":
     
     vnav_dataset = VnavDataset(

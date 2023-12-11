@@ -44,7 +44,7 @@ def main(config):
     transform = transforms.Compose(transform)
 
     train_datasets = []
-    test_datasets = {}
+    eval_datasets = []
     for dataset_name in config["datasets"]:
         for dataset_type in ["train", "eval"]:
             dataset = VnavDataset(
@@ -65,25 +65,27 @@ def main(config):
                 train_datasets.append(dataset)
             # Test datasets
             elif dataset_type == "eval":
-                test_dataset_key = f"{dataset_name}_eval"
-                if test_dataset_key not in test_datasets:
-                    test_datasets[test_dataset_key] = {}
-                test_datasets[test_dataset_key] = dataset
+                eval_datasets.append(dataset)
     
     # Train dataloader
     train_dataset = ConcatDataset(train_datasets)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
+        shuffle=True,
+        num_workers=config["num_workers"],
+        persistent_workers=True,
     )
 
     # Eval dataloader
-    eval_dataloaders = {}
-    for eval_dataset_key, eval_dataset in test_datasets.items():
-        eval_dataloaders[eval_dataset_key] = DataLoader(
-            eval_dataset,
-            batch_size=config["batch_size"],
-        )
+    eval_dataset = ConcatDataset(eval_datasets)
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        num_workers=config["num_workers"],
+        persistent_workers=True,
+    )
     
     # Vision encoder
     visual_enc_net = VisionEncoder(
@@ -145,6 +147,10 @@ def main(config):
 
     # Start training
     print("Start training!")
+
+    # Action stats
+    action_stats = [torch.tensor(config["action_stats"]["min"], device=device),
+                    torch.tensor(config["action_stats"]["max"], device=device)]
     
     train_eval_loop_vnav(
         model=model,
@@ -152,9 +158,9 @@ def main(config):
         lr_scheduler=lr_scheduler,
         noise_scheduler=noise_scheduler,
         train_dataloader=train_dataloader, 
-        eval_dataloaders=eval_dataloaders,
+        eval_dataloader=eval_dataloader,
         transform=transform,
-        action_stats=config["action_stats"],
+        action_stats=action_stats,
         epochs=config["epochs"],
         device=device,
         project_folder=config["project_log_folder"],

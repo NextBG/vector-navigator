@@ -31,12 +31,25 @@ from utils import *
     Train the model
 '''
 
+# 2023-12-11: TODO: debug: DataLoader __del__ aborted due to timeout
+
 def main(gpu_rank, config):
     # Initialize the process group
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
     dist.init_process_group(backend="nccl", rank=gpu_rank, world_size=config["num_gpus"])
     torch.cuda.set_device(gpu_rank)
+
+    # wandb
+    if config["use_wandb"] and gpu_rank == 0:
+        wandb.login()
+        wandb.init(
+            project=config["project_name"],
+        )
+        wandb.run.name = config["run_name"]
+
+        if wandb.run:
+            wandb.config.update(config)
 
     # Seed
     if "seed" in config:
@@ -53,7 +66,7 @@ def main(gpu_rank, config):
     transform = transforms.Compose(transform)
 
     train_datasets = []
-    test_datasets = {}
+    eval_datasets = []
     for dataset_name in config["datasets"]:
         for dataset_type in ["train", "eval"]:
             dataset = VnavDataset(
@@ -74,27 +87,27 @@ def main(gpu_rank, config):
                 train_datasets.append(dataset)
             # Test datasets
             elif dataset_type == "eval":
-                test_dataset_key = f"{dataset_name}_eval"
-                if test_dataset_key not in test_datasets:
-                    test_datasets[test_dataset_key] = {}
-                test_datasets[test_dataset_key] = dataset
-    
+                eval_datasets.append(dataset)
+
     # Train dataloader
     train_dataset = ConcatDataset(train_datasets)
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
         sampler=DistributedSampler(train_dataset),
+        num_workers=config["num_workers"],
+        persistent_workers=True,
     )
 
     # Eval dataloader
-    eval_dataloaders = {}
-    for eval_dataset_key, eval_dataset in test_datasets.items():
-        eval_dataloaders[eval_dataset_key] = DataLoader(
-            eval_dataset,
-            batch_size=config["batch_size"],
-            sampler=DistributedSampler(eval_dataset),
-        )
+    eval_dataset = ConcatDataset(eval_datasets)
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=config["batch_size"],
+        sampler=DistributedSampler(eval_dataset),
+        num_workers=config["num_workers"],
+        persistent_workers=True,
+    )
     
     # Vision encoder
     visual_enc_net = VisionEncoder(
@@ -161,15 +174,19 @@ def main(gpu_rank, config):
     if gpu_rank == 0:
         print("Start training!")
     
+    # Action stats
+    action_stats = [torch.tensor(config["action_stats"]["min"], device=gpu_rank),
+                    torch.tensor(config["action_stats"]["max"], device=gpu_rank)]
+    
     train_eval_loop_vnav(
         model=ddp_model,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         noise_scheduler=noise_scheduler,
         train_dataloader=train_dataloader, 
-        eval_dataloaders=eval_dataloaders,
+        eval_dataloader=eval_dataloader,
         transform=transform,
-        action_stats=config["action_stats"],
+        action_stats=action_stats,
         epochs=config["epochs"],
         device=gpu_rank,
         project_folder=config["project_log_folder"],
@@ -197,17 +214,6 @@ if __name__ == "__main__":
     config["run_name"] = config["run_name"] + "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_log_folder"] = os.path.join("logs", config["project_name"], config["run_name"])
     os.makedirs(config["project_log_folder"])
-
-    # TODO: Wandb initialization
-    if config["use_wandb"]:
-        wandb.login()
-        wandb.init(
-            project=config["project_name"],
-        )
-        wandb.run.name = config["run_name"]
-
-        if wandb.run:
-            wandb.config.update(config)
 
     # Distributed training
     world_size = torch.cuda.device_count()
