@@ -1,12 +1,5 @@
-data/*
+__pycache__/
 
-!data/data_config.yaml
+wandb/
 
-# ignore python cache files
-__pycache__
-
-# ignore ./datasplits, ./datasets, ./logs, ./wandb
-**/data_splits
-**/datasets
-**/logs
-**/wandb
+diffusion_policy/

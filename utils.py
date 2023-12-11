@@ -1,27 +1,16 @@
 import wandb
-import os
-import yaml
 import numpy as np
-from typing import List, Optional, Dict
+from typing import Dict
 from prettytable import PrettyTable
-import tqdm
-import itertools
 import matplotlib.pyplot as plt
 import io
 from PIL import Image
 
-from vint_train.visualizing.visualize_utils import to_numpy
-from vint_train.training.logger import Logger
-from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.training_utils import EMAModel
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import transforms
-import torchvision.transforms.functional as TF
 
 
 def get_delta(actions: torch.Tensor): # shape: [BS, pred_horizon, 2]
@@ -110,19 +99,9 @@ def visualize_obs_action(
         ground_truth_actions: torch.Tensor,
         goal_vec: torch.Tensor,
         epoch:int,
-        log_folder: str,
         device: int,
         use_wandb: bool = False,
         ):
-
-    # # Create a folder to save the visualizations
-    # visualize_path = os.path.join(
-    #     log_folder,
-    #     "visualize",
-    #     f"epoch_{epoch}",
-    #     "action_sampling_prediction",
-    # )
-    # os.makedirs(visualize_path, exist_ok=True)
 
     ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
     ground_truth_actions = ground_truth_actions.reshape(-1, 2)

@@ -2,12 +2,9 @@ import io
 import numpy as np
 import os
 import pickle
-import yaml
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Tuple
 from PIL import Image
-import time
 import lmdb
-from tqdm import tqdm
 
 import torch
 from torch.utils.data import Dataset

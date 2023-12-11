@@ -1,14 +1,15 @@
 numpy
-matplotlib
-tqdm
-wandb
-torch
-torchvision
-opencv-python-headless
-lmdb
-diffusers
-efficientnet-pytorch
-git+https://github.com/ildoonet/pytorch-gradual-warmup-lr.git
-warmup-scheduler
-positional-encodings
 prettytable
+wandb
+matplotlib==3.7.4
+tqdm==4.66.1
+torch==2.1.0
+torchvision==0.16.0
+opencv-python-headless==4.8.1.78
+lmdb==1.4.1
+einops==0.7.0
+diffusers==0.11.1
+efficientnet-pytorch==0.7.1
+git+https://github.com/ildoonet/pytorch-gradual-warmup-lr.git
+warmup-scheduler==0.3.2
+# diffusion-policy

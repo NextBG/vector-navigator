@@ -125,14 +125,15 @@ def main(gpu_rank, config):
     ).to(gpu_rank)
 
     # Log the config to wandb
-    if gpu_rank == 0:
+    if gpu_rank == 0 and config["use_wandb"]:
         n_params = count_parameters(model, print_table=False)
         config["n_params"] = n_params
         wandb.config.update(config)
         print(f"Total Trainable Params: {n_params/1e6:.2f}M")
 
     # Distributed Data Parallel
-    ddp_model = DDP(model, device_ids=[gpu_rank], find_unused_parameters=True)
+    syncbn_model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    ddp_model = DDP(syncbn_model, device_ids=[gpu_rank], find_unused_parameters=True)
 
     # Noise Scheduler
     noise_scheduler = DDPMScheduler(
@@ -164,7 +165,7 @@ def main(gpu_rank, config):
 
     # Load the checkpoint if necessary
     if "checkpoint" in config:
-        checkpoint_folder = os.path.join("logs", config["project_name"], config["checkpoint"]) 
+        checkpoint_folder = os.path.join(config["logs_folder"], config["project_name"], config["checkpoint"]) 
         print(f"Loading checkpoint from {checkpoint_folder}")
         latest_path = os.path.join(checkpoint_folder, f"latest.pth")
         latest_checkpoint = torch.load(latest_path)

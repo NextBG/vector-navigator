@@ -1,11 +1,7 @@
 from tqdm import tqdm
 import wandb
 import os
-from typing import Dict
-import itertools
 import time
-from tqdm import tqdm
-import multiprocessing as mp
 
 import torch
 import torch.nn as nn
@@ -35,6 +31,7 @@ def train_eval_loop_vnav(
     eval_interval: int = 1,
     use_wandb: bool = True,
 ):
+
 
     # Prepare the EMA(Exponential Moving Average) model
     ema_model = EMAModel(model=model, power=0.75)
@@ -122,7 +119,7 @@ def train_vnav(
     last_time = time.time()
 
     # TODO: 23/12/04: Improve the performance of the training loop, maybe the dataloader is the bottleneck
-    for i, data in tqdm.tqdm(
+    for i, data in tqdm(
         enumerate(dataloader), 
         desc="Training batches", 
         total=len(dataloader), 
@@ -209,11 +206,9 @@ def evaluate_vnav(
 
     num_batches = max(int(len(dataloader) * eval_fraction), 1)
 
-    dataloader_iter = iter(dataloader)
-
     with torch.no_grad():
-        for i, data in tqdm.tqdm(
-            enumerate(dataloader_iter), 
+        for i, data in tqdm(
+            enumerate(dataloader), 
             desc="Evaluation batches", 
             total= num_batches,
             disable=(device !=  torch.device("cuda") and device != 0),
@@ -221,7 +216,7 @@ def evaluate_vnav(
 
             # only evaluate on a fraction of the dataset
             if i >= num_batches:
-                break # dataloader worker killed if break
+                break
 
             (obs_image, goal_vec, actions) = data
             obs_image = obs_image.to(device)
@@ -292,7 +287,6 @@ def evaluate_vnav(
                     ground_truth_actions=actions[0],
                     goal_vec=goal_vec[0],
                     epoch=epoch,
-                    log_folder=log_folder,
                     device=device,
                     use_wandb=use_wandb,
                 )
