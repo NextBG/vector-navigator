@@ -7,6 +7,8 @@ from prettytable import PrettyTable
 import tqdm
 import itertools
 import matplotlib.pyplot as plt
+import io
+from PIL import Image
 
 from vint_train.visualizing.visualize_utils import to_numpy
 from vint_train.training.logger import Logger
@@ -50,7 +52,7 @@ def unnormalize_data(ndata: torch.Tensor, stats: list):
 
     return data
 
-def count_parameters(model: nn.Module):
+def count_parameters(model: nn.Module, print_table: bool = False):
     table = PrettyTable(["Modules", "Parameters"])
     total_params = 0
     for name, parameter in model.named_parameters():
@@ -58,8 +60,8 @@ def count_parameters(model: nn.Module):
         params = parameter.numel()
         table.add_row([name, params])
         total_params = total_params + params
-    # print(table)
-    print(f"Total Trainable Params: {total_params/1e6:.2f}M")
+    if print_table:
+        print(table)
     return total_params
 
 # TODO: Test this function in train_eval_loop.py
@@ -108,19 +110,19 @@ def visualize_obs_action(
         ground_truth_actions: torch.Tensor,
         goal_vec: torch.Tensor,
         epoch:int,
-        project_folder: str,
+        log_folder: str,
         device: int,
         use_wandb: bool = False,
         ):
 
-    # Create a folder to save the visualizations
-    visualize_path = os.path.join(
-        project_folder,
-        "visualize",
-        f"epoch_{epoch}",
-        "action_sampling_prediction",
-    )
-    os.makedirs(visualize_path, exist_ok=True)
+    # # Create a folder to save the visualizations
+    # visualize_path = os.path.join(
+    #     log_folder,
+    #     "visualize",
+    #     f"epoch_{epoch}",
+    #     "action_sampling_prediction",
+    # )
+    # os.makedirs(visualize_path, exist_ok=True)
 
     ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
     ground_truth_actions = ground_truth_actions.reshape(-1, 2)
@@ -159,11 +161,15 @@ def visualize_obs_action(
     # plot the goal vector
     ax.plot(goal_vec[0], goal_vec[1], "b-x", markersize=10)
 
-    # Save the plot
-    save_path = os.path.join(visualize_path, f"{device}_{batch_idx}.png")
-    plt.savefig(save_path)
+    # # Save the plot locally
+    # save_path = os.path.join(visualize_path, f"{device}_{batch_idx}.png")
+
+    # Log the plot to wandb
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
     plt.close(fig)
+    buf.seek(0)
 
     # Log the plot to W&B
     if use_wandb and (device == torch.device("cuda") or device == 0):
-        wandb.log({"Eval actions": wandb.Image(save_path)})
+        wandb.log({"Evaluation/Samples": wandb.Image(Image.open(buf))})

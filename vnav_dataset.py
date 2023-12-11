@@ -19,7 +19,6 @@ class VnavDataset(Dataset):
         dataset_name: str,
         dataset_type: str,
         datasets_folder: str,
-        data_splits_folder: str,
         image_size: Tuple[int, int],
         stride: int,
         pred_horizon: int,
@@ -33,8 +32,7 @@ class VnavDataset(Dataset):
         """
         self.dataset_name = dataset_name
         self.dataset_folder = os.path.join(datasets_folder, dataset_name)
-        self.data_splits_folder = os.path.join(data_splits_folder, dataset_name, dataset_type)
-        traj_names_file = os.path.join(data_splits_folder, dataset_name, dataset_type, "traj_names.txt")
+        traj_names_file = os.path.join(self.dataset_folder, "partitions", f"{dataset_type}.txt")
 
         with open(traj_names_file, "r") as f:
             file_lines = f.read()
@@ -182,7 +180,6 @@ if __name__ == "__main__":
         dataset_name="nadawalk_tokyo",
         dataset_type="train",
         datasets_folder="/home/caoruixiang/vecnav_dataset/mount_point/datasets",
-        data_splits_folder="/home/caoruixiang/nomad_caorx/vector-navigator/data_splits",
         image_size=(128, 72),
         stride=5,
         pred_horizon=10,

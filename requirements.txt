@@ -1,0 +1,14 @@
+numpy
+matplotlib
+tqdm
+wandb
+torch
+torchvision
+opencv-python-headless
+lmdb
+diffusers
+efficientnet-pytorch
+git+https://github.com/ildoonet/pytorch-gradual-warmup-lr.git
+warmup-scheduler
+positional-encodings
+prettytable

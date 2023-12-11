@@ -27,13 +27,11 @@ from vnav_dataset import VnavDataset
 
 from utils import *
 
-'''
-    Train the model
-'''
-
 # 2023-12-11: TODO: debug: DataLoader __del__ aborted due to timeout
-
 def main(gpu_rank, config):
+    '''
+        Initialization
+    '''
     # Initialize the process group
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
@@ -45,11 +43,9 @@ def main(gpu_rank, config):
         wandb.login()
         wandb.init(
             project=config["project_name"],
-        )
+            config=config
+            )
         wandb.run.name = config["run_name"]
-
-        if wandb.run:
-            wandb.config.update(config)
 
     # Seed
     if "seed" in config:
@@ -59,21 +55,17 @@ def main(gpu_rank, config):
 
     cudnn.benchmark = True # Look for the optimal set of algorithms for that particular configuration
 
-    # Normalization for image
-    transform = ([
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # ImageNet
-    ])
-    transform = transforms.Compose(transform)
-
+    '''
+        Datasets
+    '''
     train_datasets = []
     eval_datasets = []
-    for dataset_name in config["datasets"]:
+    for dataset_name in config["dataset_names"]:
         for dataset_type in ["train", "eval"]:
             dataset = VnavDataset(
                 dataset_name=dataset_name,
                 dataset_type=dataset_type,
                 datasets_folder=config["datasets_folder"],
-                data_splits_folder=os.path.join(config["project_root_folder"], "data_splits"),
                 image_size=config["image_size"],
                 stride=config["stride"],
                 pred_horizon=config["pred_horizon"],
@@ -109,6 +101,9 @@ def main(gpu_rank, config):
         persistent_workers=True,
     )
     
+    '''
+        Model
+    '''
     # Vision encoder
     visual_enc_net = VisionEncoder(
         context_size=config["context_size"],
@@ -128,6 +123,13 @@ def main(gpu_rank, config):
         vision_encoder=visual_enc_net,
         noise_pred_net=noise_pred_net
     ).to(gpu_rank)
+
+    # Log the config to wandb
+    if gpu_rank == 0:
+        n_params = count_parameters(model, print_table=False)
+        config["n_params"] = n_params
+        wandb.config.update(config)
+        print(f"Total Trainable Params: {n_params/1e6:.2f}M")
 
     # Distributed Data Parallel
     ddp_model = DDP(model, device_ids=[gpu_rank], find_unused_parameters=True)
@@ -161,8 +163,8 @@ def main(gpu_rank, config):
     )
 
     # Load the checkpoint if necessary
-    if "load_checkpoint" in config:
-        checkpoint_folder = os.path.join("logs", config["project_name"], config["load_checkpoint"]) 
+    if "checkpoint" in config:
+        checkpoint_folder = os.path.join("logs", config["project_name"], config["checkpoint"]) 
         print(f"Loading checkpoint from {checkpoint_folder}")
         latest_path = os.path.join(checkpoint_folder, f"latest.pth")
         latest_checkpoint = torch.load(latest_path)
@@ -170,14 +172,23 @@ def main(gpu_rank, config):
         # Load the state dict
         ddp_model.load_state_dict(latest_checkpoint)
 
-    # Start training
-    if gpu_rank == 0:
-        print("Start training!")
-    
-    # Action stats
+    '''
+        Normalization
+    '''
+    # Normalize the image
+    transform = ([
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # ImageNet
+    ])
+    transform = transforms.Compose(transform)
+
+    # Normalize the actions
     action_stats = [torch.tensor(config["action_stats"]["min"], device=gpu_rank),
                     torch.tensor(config["action_stats"]["max"], device=gpu_rank)]
-    
+
+    '''
+        Training and evaluation
+    '''
+    # Train and eval loop
     train_eval_loop_vnav(
         model=ddp_model,
         optimizer=optimizer,
@@ -189,7 +200,7 @@ def main(gpu_rank, config):
         action_stats=action_stats,
         epochs=config["epochs"],
         device=gpu_rank,
-        project_folder=config["project_log_folder"],
+        log_folder=config["log_folder"],
         use_wandb=config["use_wandb"],
         current_epoch=0,
         eval_interval=config["eval_interval"],
@@ -198,30 +209,41 @@ def main(gpu_rank, config):
     # Clean up
     dist.destroy_process_group()
 
-    if gpu_rank == 0:
-        print("Training finished!")
 
 if __name__ == "__main__":
-    # Get path of current folder
-    PROJECT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-
     # Load the config
-    with open(os.path.join(PROJECT_ROOT_DIR, "config.yaml"), "r") as f:
-        config = yaml.safe_load(f)
-    config["project_root_folder"] = PROJECT_ROOT_DIR
+    default_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 
-    # Create project folder
+    # Parse the arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=default_config_path,
+        help="Path to the config file",
+    )
+    args = parser.parse_args()
+
+    # load the config
+    with open(args.config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    # Create log folder
     config["run_name"] = config["run_name"] + "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
-    config["project_log_folder"] = os.path.join("logs", config["project_name"], config["run_name"])
-    os.makedirs(config["project_log_folder"])
+    config["log_folder"] = os.path.join(config["logs_folder"], config["project_name"], config["run_name"])
+    os.makedirs(config["log_folder"])
 
     # Distributed training
     world_size = torch.cuda.device_count()
     config["num_gpus"] = world_size
 
-    # Run the trainning code
+    print(f"Start training at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Run the trainning code with distributed data parallel(DDP)
     mp.spawn(
         main,
         args=(config, ),
         nprocs=world_size,
     )
+
+    print(f"Training finished at {time.strftime('%Y-%m-%d %H:%M:%S')}")

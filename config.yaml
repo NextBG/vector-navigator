@@ -13,10 +13,10 @@ pred_horizon: 16
 context_size: 5
 min_goal_dist: 5
 max_goal_dist: 32
-max_traj_len: -1
+max_traj_len: 10
 
+epochs: 3 # 100
 lr: 1e-4
-epochs: 100 # 100
 warmup_epochs: 4
 encoding_size: 256
 down_dims: [64, 128, 256]
@@ -27,10 +27,10 @@ action_stats:
   min: [-24, -24]
   max: [24, 24]
 
-# Datasets
+# Input/output paths
 datasets_folder: /home/caoruixiang/datasets_mnt/vnav_datasets
-
-datasets: [nadawalk_tokyo]
+logs_folder: /home/caoruixiang/datasets_mnt/vnav_logs
+dataset_names: [nadawalk_tokyo]
 
 # Load checkpoint
-# load_checkpoint: "vnav_test_2023_12_07_12_02_25"
+# checkpoint: "vnav_test_2023_12_07_12_02_25"

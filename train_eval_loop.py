@@ -30,7 +30,7 @@ def train_eval_loop_vnav(
     action_stats: list,
     epochs: int,
     device: int,
-    project_folder: str,
+    log_folder: str,
     current_epoch: int = 0,
     eval_interval: int = 1,
     use_wandb: bool = True,
@@ -43,6 +43,11 @@ def train_eval_loop_vnav(
     for epoch in range(current_epoch, current_epoch+epochs):
         if device ==  torch.device("cuda") or device == 0:
             print(f">>> Epoch {epoch}/{current_epoch+epochs-1} <<<")
+
+        # learning rate log
+        if use_wandb:
+            if device ==  torch.device("cuda") or device == 0:
+                wandb.log({"Train/Learning rate": lr_scheduler.get_last_lr()[0]})
 
         train_vnav(
             model=model,
@@ -57,16 +62,16 @@ def train_eval_loop_vnav(
             use_wandb=use_wandb,
         )
 
-        # learning rate scheduler step, dont step on the last epoch
+        # learning rate scheduler step
         if epoch < current_epoch+epochs-1:
             lr_scheduler.step()
 
         # Model save paths
-        ema_numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
-        numbered_path = os.path.join(project_folder, f"{epoch}.pth")
-        latest_path = os.path.join(project_folder, f"latest.pth")
-        optimizer_latest_path = os.path.join(project_folder, f"optimizer_latest.pth")
-        scheduler_latest_path = os.path.join(project_folder, f"scheduler_latest.pth")
+        ema_numbered_path = os.path.join(log_folder, f"ema_{epoch}.pth")
+        numbered_path = os.path.join(log_folder, f"{epoch}.pth")
+        latest_path = os.path.join(log_folder, f"latest.pth")
+        optimizer_latest_path = os.path.join(log_folder, f"optimizer_latest.pth")
+        scheduler_latest_path = os.path.join(log_folder, f"scheduler_latest.pth")
         
         # Save the EMA model
         torch.save(ema_model.averaged_model.state_dict(), ema_numbered_path)
@@ -90,14 +95,11 @@ def train_eval_loop_vnav(
                 action_stats=action_stats,
                 device=device,
                 noise_scheduler=noise_scheduler,
-                project_folder=project_folder,
+                log_folder=log_folder,
                 epoch=epoch,
                 use_wandb=use_wandb,
             )
 
-        # TODO: Log to wandb
-
-# TODO: write the dataset class and test "train_vnav" function
 def train_vnav(
     model: nn.Module,
     ema_model: EMAModel,
@@ -115,6 +117,9 @@ def train_vnav(
     # check if using parallel training
     if type(device) == int:
         dataloader.sampler.set_epoch(epoch)
+
+    # Timer for the training loop
+    last_time = time.time()
 
     # TODO: 23/12/04: Improve the performance of the training loop, maybe the dataloader is the bottleneck
     for i, data in tqdm.tqdm(
@@ -175,7 +180,13 @@ def train_vnav(
         # Update Exponential Moving Average of the model weights
         ema_model.step(model)
 
-# Evaluate the model
+        # Wandb logging
+        if use_wandb and (device == 0 or device == torch.device("cuda")):
+            wandb.log({"Train/Diffusion loss": diffusion_loss.item()}) # Training loss
+            wandb.log({"Train/Speed (iter per second)": 1/(time.time()-last_time)}) # Training speed
+            last_time = time.time()
+
+
 def evaluate_vnav(
         ema_model: EMAModel,
         dataloader: DataLoader,
@@ -184,7 +195,7 @@ def evaluate_vnav(
         device: int,
         noise_scheduler: DDPMScheduler,
         epoch: int,
-        project_folder: str,
+        log_folder: str,
         eval_fraction: float= 0.1,
         visualization_interval: int = 3,
         use_wandb: bool = False,
@@ -258,8 +269,8 @@ def evaluate_vnav(
             diffusion_loss = F.mse_loss(noise_pred, noise)
 
             # log the loss to wandb
-            if use_wandb and device == 0:
-                wandb.log({"Diffusion loss": diffusion_loss.item()})
+            if use_wandb and (device == 0 or device == torch.device("cuda")):
+                wandb.log({"Evaluation/Diffusion loss": diffusion_loss.item()})
 
             sampled_actions = sample_actions(
                 ema_model,
@@ -281,7 +292,7 @@ def evaluate_vnav(
                     ground_truth_actions=actions[0],
                     goal_vec=goal_vec[0],
                     epoch=epoch,
-                    project_folder=project_folder,
+                    log_folder=log_folder,
                     device=device,
                     use_wandb=use_wandb,
                 )
