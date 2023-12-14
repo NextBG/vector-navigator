@@ -2,6 +2,7 @@ from tqdm import tqdm
 import wandb
 import os
 import time
+import pickle
 
 import torch
 import torch.nn as nn
@@ -24,10 +25,11 @@ def train_eval_loop_vnav(
     eval_dataloader: DataLoader,
     transform: transforms,
     action_stats: list,
+    goal_mask_prob: float,
     epochs: int,
     device: int,
     log_folder: str,
-    current_epoch: int = 0,
+    start_epoch: int = 0,
     eval_interval: int = 1,
     use_wandb: bool = True,
 ):
@@ -37,9 +39,9 @@ def train_eval_loop_vnav(
     ema_model = EMAModel(model=model, power=0.75)
 
     # Train Loop
-    for epoch in range(current_epoch, current_epoch+epochs):
+    for epoch in range(start_epoch, start_epoch+epochs):
         if device ==  torch.device("cuda") or device == 0:
-            print(f">>> Epoch {epoch}/{current_epoch+epochs-1} <<<")
+            print(f">>> Epoch {epoch}/{start_epoch+epochs-1} <<<")
 
         # learning rate log
         if use_wandb:
@@ -53,6 +55,7 @@ def train_eval_loop_vnav(
             dataloader=train_dataloader,
             transform=transform,
             action_stats=action_stats,
+            goal_mask_prob=goal_mask_prob,
             device=device,
             noise_scheduler=noise_scheduler,
             epoch=epoch,
@@ -60,7 +63,7 @@ def train_eval_loop_vnav(
         )
 
         # learning rate scheduler step
-        if epoch < current_epoch+epochs-1:
+        if epoch < start_epoch+epochs-1:
             lr_scheduler.step()
 
         # Model save paths
@@ -83,6 +86,14 @@ def train_eval_loop_vnav(
         # Save the scheduler
         torch.save(lr_scheduler.state_dict(), scheduler_latest_path)
 
+        # Save the metadata
+        metadata = {
+            "current_epoch": start_epoch+epoch+1,
+        }
+        metadata_path = os.path.join(log_folder, f"metadata.pkl")
+        with open(metadata_path, "wb") as f:
+            pickle.dump(metadata, f)
+
         # Evaluation
         if (epoch+1)%eval_interval == 0:
             evaluate_vnav(
@@ -90,6 +101,7 @@ def train_eval_loop_vnav(
                 dataloader=eval_dataloader,
                 transform=transform,
                 action_stats=action_stats,
+                goal_mask_prob=goal_mask_prob,
                 device=device,
                 noise_scheduler=noise_scheduler,
                 log_folder=log_folder,
@@ -104,6 +116,7 @@ def train_vnav(
     dataloader: DataLoader,
     transform: transforms,
     action_stats: list,
+    goal_mask_prob: float,
     device,
     noise_scheduler: DDPMScheduler,
     epoch: int,
@@ -123,27 +136,34 @@ def train_vnav(
         enumerate(dataloader), 
         desc="Training batches", 
         total=len(dataloader), 
-        disable=(device !=  torch.device("cuda") and device != 0)
+        disable=(device !=  torch.device("cuda") and device != 0),
+        bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
         ):
-        
-        # Print the load time
-        (obs_image, goal_vec, actions) = data
+        # Load data
+        (obs_image, goal_vec, actions, yaws, dataset_name, metadata) = data
         obs_image = obs_image.to(device)
         goal_vec = goal_vec.to(device)
         actions = actions.to(device)
+
+        # Batch size
+        BS = actions.shape[0]
 
         # Observation images
         obs_images = torch.split(obs_image, 3, dim=1) # Split the image pack into individual images
         batch_obs_images = [transform(obs) for obs in obs_images]
         batch_obs_images = torch.cat(batch_obs_images, dim=1)
 
+        # Generate goal mask
+        goal_mask = (torch.rand((BS,)) < goal_mask_prob).float().to(device)
+
         # Goal vectors
-        batch_goal_vecs = goal_vec
+        batch_goal_vecs = goal_vec.to(device)
 
         # Inference the observation-goal context
         obsgoal_context = model(
             "vision_encoder", 
             obs_img=batch_obs_images,
+            goal_mask=goal_mask,
             goal_vec=batch_goal_vecs,
             )
         
@@ -189,6 +209,7 @@ def evaluate_vnav(
         dataloader: DataLoader,
         transform: transforms,
         action_stats: list,
+        goal_mask_prob: float,
         device: int,
         noise_scheduler: DDPMScheduler,
         epoch: int,
@@ -212,24 +233,28 @@ def evaluate_vnav(
             desc="Evaluation batches", 
             total= num_batches,
             disable=(device !=  torch.device("cuda") and device != 0),
+            bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
             ):
 
             # only evaluate on a fraction of the dataset
             if i >= num_batches:
                 break
 
-            (obs_image, goal_vec, actions) = data
-            obs_image = obs_image.to(device)
+            (obs_imgs, goal_vec, actions, yaws, dataset_name, metadata) = data
+            obs_imgs = obs_imgs.to(device) # [BS, context_size*3, H, W]
             goal_vec = goal_vec.to(device)
             actions = actions.to(device)
 
             # Batch size
             BS = actions.shape[0]
+ 
+            # Apply the transform to the observation images
+            splited_obs_imgs = torch.split(obs_imgs, 3, dim=1) # Split the image pack into individual images
+            batch_obs_images = [transform(obs) for obs in splited_obs_imgs]
+            batch_obs_images = torch.cat(batch_obs_images, dim=1) # [BS, context_size*3, H, W]
 
-            # Observation images
-            obs_images = torch.split(obs_image, 3, dim=1)
-            batch_obs_images = [transform(obs) for obs in obs_images]
-            batch_obs_images = torch.cat(batch_obs_images, dim=1)
+            # Generate goal mask
+            goal_mask = (torch.rand((BS,)) < goal_mask_prob).float().to(device)
 
             # Goal vectors
             batch_goal_vecs = goal_vec
@@ -238,6 +263,7 @@ def evaluate_vnav(
             obsgoal_context = ema_model(
                 "vision_encoder", 
                 obs_img=batch_obs_images,
+                goal_mask=goal_mask,
                 goal_vec=batch_goal_vecs,
                 )
             
@@ -273,6 +299,7 @@ def evaluate_vnav(
                 batch_obs_images[0],
                 batch_goal_vecs[0],
                 pred_horizon=len(actions[0]),
+                goal_mask=goal_mask[0],
                 action_dim=2,
                 action_stats=action_stats,
                 num_samples=10,
@@ -281,12 +308,14 @@ def evaluate_vnav(
 
             if i%visualization_interval == 0:
                 visualize_obs_action( # TODO: add the ground truth to the plot
-                    batch_idx=i,
-                    obs_img=obs_images[0][-1],
+                    obs_imgs=obs_imgs[0],
                     sampled_actions=sampled_actions,
                     ground_truth_actions=actions[0],
+                    ground_truth_yaws=yaws[0],
                     goal_vec=goal_vec[0],
-                    epoch=epoch,
+                    goal_mask=goal_mask[0],
+                    dataset_name=dataset_name[0],
+                    metadata=metadata[0],
                     device=device,
                     use_wandb=use_wandb,
                 )

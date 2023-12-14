@@ -60,12 +60,13 @@ def sample_actions(
         obs_images: torch.Tensor,
         goal_vector: torch.Tensor,
         pred_horizon: int,
+        goal_mask: torch.Tensor,
         action_dim: int,
         action_stats: Dict[str, np.ndarray],
         num_samples: int,
         device: torch.device,
 ):
-    obs_cond = model(func_name="vision_encoder", obs_img=obs_images.unsqueeze(0), goal_vec=goal_vector.unsqueeze(0)) # [1, enc_size]
+    obs_cond = model(func_name="vision_encoder", obs_img=obs_images.unsqueeze(0), goal_mask=goal_mask.unsqueeze(0), goal_vec=goal_vector.unsqueeze(0)) # [1, enc_size]
     obs_cond = obs_cond.repeat_interleave(num_samples, dim=0) # [num_samples, enc_size]
 
     diffusion_output = torch.randn((num_samples, pred_horizon, action_dim), device=device)
@@ -93,62 +94,115 @@ def sample_actions(
     return actions
 
 def visualize_obs_action(
-        batch_idx: int,
-        obs_img: torch.Tensor,
+        obs_imgs: torch.Tensor, # [context_size*3, H, W]]
         sampled_actions: torch.Tensor,
         ground_truth_actions: torch.Tensor,
+        ground_truth_yaws: torch.Tensor,
         goal_vec: torch.Tensor,
-        epoch:int,
+        goal_mask: torch.Tensor,
+        dataset_name: str,
+        metadata: Dict[str, str],
         device: int,
         use_wandb: bool = False,
         ):
 
-    ground_truth_actions = ground_truth_actions.detach().cpu().numpy()
-    ground_truth_actions = ground_truth_actions.reshape(-1, 2)
+    # Plot the ground truth actions
+    ground_truth_actions = ground_truth_actions.detach().cpu().numpy() # [pred_horizon, 2]
     ground_truth_actions = np.concatenate([np.zeros((1,2)), ground_truth_actions], axis=0) # [pred_horizon+1, 2]
     gt_x = ground_truth_actions[:, 0]
     gt_y = ground_truth_actions[:, 1]
 
+    # Plot the sampled actions
     sampled_actions = sampled_actions.detach().cpu().numpy() # [num_samples, pred_horizon, 2]
     sampled_actions = np.concatenate([np.zeros((sampled_actions.shape[0], 1, sampled_actions.shape[-1])), sampled_actions], axis=1) # [num_samples, pred_horizon+1, 2]
 
+    # Plot the goal vector
     goal_vec = goal_vec.detach().cpu().numpy()
 
-    fig = plt.figure()
-    # Plot the first observation image
-    obs_img = obs_img.detach().cpu().numpy()
-    obs_img = np.transpose(obs_img, (1, 2, 0))
-    ax = fig.add_subplot(121)
-    ax.set_title("Observation image")
-    ax.imshow(obs_img)
+    # Goal mask
+    goal_mask = goal_mask.detach().cpu().numpy()
 
-    # plot all sampled action trajectories in a single plot
+    # Rotate the sampled actions and goal vector to local coordinates relative to the first observation
+    ground_truth_yaws = ground_truth_yaws.detach().cpu().numpy() # [pred_horizon+1, ]
+
+    # Calculate direction vectors from the yaw angles
+    direction_vecs = np.stack([np.sin(ground_truth_yaws), np.cos(ground_truth_yaws)], axis=-1) # [pred_horizon+1, 2]
+
+
+    # Plot the last observation image
+    obs_imgs = torch.split(obs_imgs, 3, dim=0)
+    obs_imgs = torch.stack(obs_imgs, dim=0) # [context_size, 3, H, W]
+    obs_imgs = obs_imgs.permute(0, 2, 3, 1)
+    obs_imgs = obs_imgs.detach().cpu().numpy()
+
+    # Number of images
+    num_imgs = obs_imgs.shape[0]
+
+    # Plot
+    fig = plt.figure(figsize=(10*num_imgs, 10))
+    fig.suptitle(f"Dataset: {dataset_name}, Trajectory: {metadata[0]:06d}_{metadata[1]:06d}, Timestep: {metadata[2]:06d}")
+
+    # Plot Observations
+    for i in range(num_imgs):
+        ax = fig.add_subplot(1, num_imgs, i+1)
+        ax.set_title(f"Observation T-{num_imgs-1-i}")
+        ax.imshow(obs_imgs[i]) 
+
+    # Log the plot to W&B
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close(fig)
+    buf.seek(0)
+    if use_wandb and (device == torch.device("cuda") or device == 0):
+        wandb.log({"Evaluation/Observations": wandb.Image(Image.open(buf))})
+
+    # Actions plot
+    fig = plt.figure(figsize=(20, 10))
+    fig.suptitle(f"Dataset: {dataset_name}, Trajectory: {metadata[0]:06d}_{metadata[1]:06d}, Timestep: {metadata[2]:06d}")
+
+    # Plot the last observation image
+    ax = fig.add_subplot(121)
+    ax.set_title("Observations T")
+    ax.imshow(obs_imgs[-1])
+    
+    # Plot the actions
     ax = fig.add_subplot(122)
     ax.grid()
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_title("Actions")
+    ax.axis("equal")
 
+    # Plot all sampled trajectories
     for i in range(sampled_actions.shape[0]):
-            x = sampled_actions[i, :, 0]
-            y = sampled_actions[i, :, 1]
-            ax.plot(x, y, "r-o", alpha=0.1, markersize=3)
+        x = sampled_actions[i, :, 0]
+        y = sampled_actions[i, :, 1]
+        ax.plot(x, y, "r-o", alpha=0.1, markersize=3)
 
     # Plot the ground truth actions
-    ax.plot(gt_x, gt_y, "g-o", markersize=5)
+    ax.plot(gt_x, gt_y, "g-o", markersize=3)
 
     # plot the goal vector
-    ax.plot(goal_vec[0], goal_vec[1], "b-x", markersize=10)
+    if goal_mask == 0:
+        ax.plot(goal_vec[0], goal_vec[1], "b-x", markersize=10)
+    else:
+        ax.plot(goal_vec[0], goal_vec[1], "b-o", markersize=10)
 
-    # # Save the plot locally
-    # save_path = os.path.join(visualize_path, f"{device}_{batch_idx}.png")
+    # Plot the yaw angles
+    ax.quiver(
+        ground_truth_actions[:,0], 
+        ground_truth_actions[:,1], 
+        direction_vecs[:,0],
+        direction_vecs[:,1],
+        color='g', 
+        alpha=0.5,
+        width=0.005,
+        )
 
     # Log the plot to wandb
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
     plt.close(fig)
     buf.seek(0)
-
-    # Log the plot to W&B
     if use_wandb and (device == torch.device("cuda") or device == 0):
-        wandb.log({"Evaluation/Samples": wandb.Image(Image.open(buf))})
+        wandb.log({"Evaluation/Actions": wandb.Image(Image.open(buf))})

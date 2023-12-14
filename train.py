@@ -161,12 +161,14 @@ def main(config):
         eval_dataloader=eval_dataloader,
         transform=transform,
         action_stats=action_stats,
+        goal_mask_prob=config["goal_mask_prob"],
         epochs=config["epochs"],
         device=device,
         project_folder=config["project_log_folder"],
         use_wandb=config["use_wandb"],
         current_epoch=0,
         eval_interval=config["eval_interval"],
+        goal_mask_prob=config["goal_mask_prob"],
     )
 
     print("Training finished!")

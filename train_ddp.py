@@ -4,27 +4,26 @@ import numpy as np
 import argparse
 import wandb
 import yaml
+import pickle
 
 import torch
-
 from torch.optim import AdamW
-import torch.backends.cudnn as cudnn
 from torchvision import transforms
 from torch.utils.data import DataLoader, ConcatDataset
 
+# Distributed training
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
 from warmup_scheduler import GradualWarmupScheduler
-from models import Vnav, VisionEncoder
 from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
+# Custiom imports
 from train_eval_loop import train_eval_loop_vnav
 from vnav_dataset import VnavDataset
-
+from models import Vnav, VisionEncoder
 from utils import *
 
 # 2023-12-11: TODO: debug: DataLoader __del__ aborted due to timeout
@@ -51,9 +50,9 @@ def main(gpu_rank, config):
     if "seed" in config:
         np.random.seed(config["seed"])
         torch.manual_seed(config["seed"])
-        cudnn.deterministic = True
+        torch.backends.cudnn.deterministic = True
 
-    cudnn.benchmark = True # Look for the optimal set of algorithms for that particular configuration
+    torch.backends.cudnn.benchmark = True # Look for the optimal set of algorithms for that particular configuration
 
     '''
         Datasets
@@ -132,8 +131,7 @@ def main(gpu_rank, config):
         print(f"Total Trainable Params: {n_params/1e6:.2f}M")
 
     # Distributed Data Parallel
-    syncbn_model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    ddp_model = DDP(syncbn_model, device_ids=[gpu_rank], find_unused_parameters=True)
+    ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu_rank], find_unused_parameters=True)
 
     # Noise Scheduler
     noise_scheduler = DDPMScheduler(
@@ -163,16 +161,28 @@ def main(gpu_rank, config):
         after_scheduler=lr_scheduler
     )
 
+    current_epoch = 0
+
     # Load the checkpoint if necessary
     if "checkpoint" in config:
         checkpoint_folder = os.path.join(config["logs_folder"], config["project_name"], config["checkpoint"]) 
-        print(f"Loading checkpoint from {checkpoint_folder}")
+
+        # Load the latest checkpoint
         latest_path = os.path.join(checkpoint_folder, f"latest.pth")
         latest_checkpoint = torch.load(latest_path)
         
         # Load the state dict
         ddp_model.load_state_dict(latest_checkpoint)
 
+        # Load the metadata
+        metadata_path = os.path.join(checkpoint_folder, f"metadata.pkl")
+        with open(metadata_path, "rb") as f:
+            metadata = pickle.load(f)
+        current_epoch = metadata["current_epoch"]
+
+        if gpu_rank == 0: 
+            print(f"Loading checkpoint from {checkpoint_folder}")
+            
     '''
         Normalization
     '''
@@ -198,12 +208,13 @@ def main(gpu_rank, config):
         train_dataloader=train_dataloader, 
         eval_dataloader=eval_dataloader,
         transform=transform,
+        goal_mask_prob=config["goal_mask_prob"],
         action_stats=action_stats,
         epochs=config["epochs"],
         device=gpu_rank,
         log_folder=config["log_folder"],
         use_wandb=config["use_wandb"],
-        current_epoch=0,
+        start_epoch=current_epoch,
         eval_interval=config["eval_interval"],
     )
 

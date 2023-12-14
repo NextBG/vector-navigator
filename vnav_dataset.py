@@ -5,10 +5,13 @@ import pickle
 from typing import Tuple
 from PIL import Image
 import lmdb
+from tqdm import tqdm
 
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
+
+# TODO: 2023-12-11: visualize the timestamps of the sample
 
 class VnavDataset(Dataset):
     def __init__(
@@ -50,7 +53,7 @@ class VnavDataset(Dataset):
         self.cache_file = os.path.join(self.dataset_folder, f"cache_{image_size[0]}x{image_size[1]}.lmdb")
         self.lmdb_env = None
 
-    def _build_index(self):
+    def _build_index(self, yaw_th_deg=10):
         samples_index = []
         traj_len_to_use = min(self.max_traj_len, len(self.traj_names))
         for traj_name in self.traj_names[:traj_len_to_use]:
@@ -63,10 +66,29 @@ class VnavDataset(Dataset):
             traj_len = len(traj_data["positions"])
 
             begin_time = self.context_size * self.stride
-            end_time = traj_len - self.pred_horizon * self.stride
+            end_time = traj_len - max(self.pred_horizon, self.min_goal_dist) * self.stride
+
             for curr_time in range(begin_time, end_time):
+                # Check if the camera direction is alone with the direction vector at T=0, If not, skip the trajectory
+                # yaw at current time (T=0)
+                yaw_t0 = traj_data["yaws"][curr_time] 
+                # Convert to degrees
+                yaw_t0_deg = yaw_t0 * 180 / np.pi
+
+                # Get the direction vector by pos(T=1) - pos(T=0)
+                dir_vec = traj_data["positions"][curr_time + self.stride] - traj_data["positions"][curr_time]
+                # Convert to degrees
+                dir_vec_deg = np.arctan2(dir_vec[0], dir_vec[1]) * 180 / np.pi
+
+                # If the difference is larger than the threshold, skip the trajectory
+                if np.abs(yaw_t0_deg - dir_vec_deg) > yaw_th_deg:
+                    continue
+
+                # min and max goal distance
                 max_goal_dist = min(self.max_goal_dist * self.stride, traj_len - curr_time - 1)
-                min_goal_dist = min(self.min_goal_dist * self.stride, max_goal_dist)
+                min_goal_dist = self.min_goal_dist * self.stride
+
+                # Add to the index
                 samples_index.append((traj_name, curr_time, min_goal_dist, max_goal_dist))
 
         return samples_index
@@ -101,22 +123,19 @@ class VnavDataset(Dataset):
         start_index = curr_time
         end_index = curr_time + self.pred_horizon * self.stride + 1
 
-        positions = traj_data["positions"][start_index:end_index:self.stride]
-        yaws = traj_data["yaws"][start_index:end_index:self.stride]
+        # Get the actions, yaws, and goal vector
+        positions = traj_data["positions"][start_index:end_index:self.stride] # [pred_horizon+1, 2]
+        yaws = traj_data["yaws"][start_index:end_index:self.stride] # [pred_horizon+1, 1]
         goal_pos = traj_data["positions"][min(goal_time, len(traj_data["positions"]) - 1)]
 
-
+        # Convert to local coordinates
         waypoints = self._to_local_coords(positions, positions[0], yaws[0])
         goal_pos = self._to_local_coords(goal_pos, positions[0], yaws[0])
         yaws = yaws - yaws[0]
 
-        yaw_actions = yaws[1:]
         actions = waypoints[1:]
-        
-        # Add the yaw actions to the actions
-        # actions = np.concatenate([actions, yaw_actions[:, None]], axis=1)
 
-        return actions, goal_pos
+        return actions, yaws, goal_pos
     
     def _get_trajectory(self, trajectory_name):
         # Return none if the trajectory doesn't exist
@@ -135,7 +154,12 @@ class VnavDataset(Dataset):
         current_file, curr_time, min_goal_dist, max_goal_dist = self.index_to_data[i]
 
         # Sample goal
-        goal_offset = np.random.randint(min_goal_dist//self.stride, (max_goal_dist + 1)//self.stride)
+        min_goal_dist_strided = min_goal_dist // self.stride
+        max_goal_dist_strided = (max_goal_dist+1) // self.stride
+        if min_goal_dist_strided == max_goal_dist_strided:
+            goal_offset = min_goal_dist_strided
+        else:
+            goal_offset = np.random.randint(min_goal_dist_strided, max_goal_dist_strided)
         goal_time = curr_time + goal_offset * self.stride
 
         # Load context images
@@ -150,16 +174,26 @@ class VnavDataset(Dataset):
                 )
             )
         context = [(current_file, t) for t in context_times]
-        obs_context = torch.cat([self._load_image(current_file, t) for current_file, t in context])
+        loaded_images = [self._load_image(current_file, t) for current_file, t in context]
+        obs_context = torch.cat(loaded_images)
 
         # Get actions and goal vector
         curr_traj_data = self._get_trajectory(current_file)
-        actions, goal_vec = self._compute_actions(curr_traj_data, curr_time, goal_time)
-        
+        actions, yaws, goal_vec = self._compute_actions(curr_traj_data, curr_time, goal_time)
+
+        # Pass the metadata as a tensor traj_name: xxxxxx_yyyyyy where xxxxxx is the video index and yyyyyy is the traj name
+        dataset_name: str = self.dataset_name
+        video_index = int(current_file.split("_")[0])
+        traj_index = int(current_file.split("_")[1])
+        metadata = torch.tensor([video_index, traj_index, curr_time], dtype=torch.int32)
+
         return (
             torch.as_tensor(obs_context, dtype=torch.float32),
             torch.as_tensor(goal_vec, dtype=torch.float32),
-            torch.as_tensor(actions, dtype=torch.float32)
+            torch.as_tensor(actions, dtype=torch.float32),
+            torch.as_tensor(yaws, dtype=torch.float32),
+            dataset_name,
+            metadata,
         )
 
     def __len__(self) -> int:
