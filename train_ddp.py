@@ -67,6 +67,8 @@ def main(gpu_rank, config):
                 datasets_folder=config["datasets_folder"],
                 image_size=config["image_size"],
                 stride=config["stride"],
+                cam_rot_th=config["cam_rot_th"],
+                goal_rot_th=config["goal_rot_th"],
                 pred_horizon=config["pred_horizon"],
                 context_size=config["context_size"],
                 min_goal_dist=config["min_goal_dist"],

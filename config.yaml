@@ -6,17 +6,19 @@ use_wandb: true
 
 # Train setup
 seed: 0
-batch_size: 192
-image_size: [128, 72] # width, height, 16:9
+batch_size: 48
+image_size: [256, 144] # width, height, 16:9
 stride: 5
 pred_horizon: 8
 context_size: 5
 min_goal_dist: 10
 max_goal_dist: 32
-max_traj_len: 100 #100
-goal_mask_prob: 0.5
+max_traj_len: 200 #100
+goal_mask_prob: 0.2
+cam_rot_th: 10 # data point with a large camera rotation is discarded
+goal_rot_th: 10 # goal vector that has a small difference with the moving direction is discarded
 
-epochs: 30 # 20
+epochs: 100 # 20
 lr: 1e-4
 warmup_epochs: 4
 encoding_size: 256

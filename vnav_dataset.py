@@ -21,6 +21,8 @@ class VnavDataset(Dataset):
         datasets_folder: str,
         image_size: Tuple[int, int],
         stride: int,
+        cam_rot_th: float,
+        goal_rot_th: float,
         pred_horizon: int,
         context_size: int,
         min_goal_dist: int,
@@ -47,13 +49,15 @@ class VnavDataset(Dataset):
         self.min_goal_dist = min_goal_dist
         self.max_goal_dist = max_goal_dist
         self.max_traj_len = max_traj_len
+        self.cam_rot_th = cam_rot_th
+        self.goal_rot_th = goal_rot_th
 
         self.index_to_data = self._build_index()
 
         self.cache_file = os.path.join(self.dataset_folder, f"cache_{image_size[0]}x{image_size[1]}.lmdb")
         self.lmdb_env = None
 
-    def _build_index(self, yaw_th_deg=10):
+    def _build_index(self):
         samples_index = []
         traj_len_to_use = min(self.max_traj_len, len(self.traj_names))
         for traj_name in self.traj_names[:traj_len_to_use]:
@@ -77,19 +81,38 @@ class VnavDataset(Dataset):
 
                 # Get the direction vector by pos(T=1) - pos(T=0)
                 dir_vec = traj_data["positions"][curr_time + self.stride] - traj_data["positions"][curr_time]
-                # Convert to degrees
                 dir_vec_deg = np.arctan2(dir_vec[0], dir_vec[1]) * 180 / np.pi
 
                 # If the difference is larger than the threshold, skip the trajectory
-                if np.abs(yaw_t0_deg - dir_vec_deg) > yaw_th_deg:
+                if np.abs(yaw_t0_deg - dir_vec_deg) > self.cam_rot_th:
                     continue
 
                 # min and max goal distance
                 max_goal_dist = min(self.max_goal_dist * self.stride, traj_len - curr_time - 1)
                 min_goal_dist = self.min_goal_dist * self.stride
+                min_goal_dist_strided = min_goal_dist // self.stride
+                max_goal_dist_strided = (max_goal_dist+1) // self.stride
+
+                # Sample goal
+                if min_goal_dist_strided == max_goal_dist_strided:
+                    goal_offset = min_goal_dist_strided
+                else:
+                    for _ in range(3): # try 3 times
+                        goal_offset = np.random.randint(min_goal_dist_strided, max_goal_dist_strided)
+                        # take the 
+                        goal_vec = traj_data["positions"][curr_time + goal_offset * self.stride] - traj_data["positions"][curr_time]
+
+                        # if the difference between the goal vector and the direction vector is smaller than the threshold, skip the trajectory
+                        goal_vec_deg = np.arctan2(goal_vec[0], goal_vec[1]) * 180 / np.pi
+                        if np.abs(yaw_t0_deg - goal_vec_deg) > self.goal_rot_th:
+                            break
+                    if np.abs(yaw_t0_deg - goal_vec_deg) <= self.goal_rot_th:
+                        continue
+                
+                goal_time = curr_time + goal_offset * self.stride
 
                 # Add to the index
-                samples_index.append((traj_name, curr_time, min_goal_dist, max_goal_dist))
+                samples_index.append((traj_name, curr_time, goal_time))
 
         return samples_index
 
@@ -151,16 +174,7 @@ class VnavDataset(Dataset):
         return intr_data
 
     def __getitem__(self, i: int) -> Tuple[torch.Tensor]:
-        current_file, curr_time, min_goal_dist, max_goal_dist = self.index_to_data[i]
-
-        # Sample goal
-        min_goal_dist_strided = min_goal_dist // self.stride
-        max_goal_dist_strided = (max_goal_dist+1) // self.stride
-        if min_goal_dist_strided == max_goal_dist_strided:
-            goal_offset = min_goal_dist_strided
-        else:
-            goal_offset = np.random.randint(min_goal_dist_strided, max_goal_dist_strided)
-        goal_time = curr_time + goal_offset * self.stride
+        current_file, curr_time, goal_time = self.index_to_data[i]
 
         # Load context images
         context = []

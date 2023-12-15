@@ -104,7 +104,6 @@ def train_eval_loop_vnav(
                 goal_mask_prob=goal_mask_prob,
                 device=device,
                 noise_scheduler=noise_scheduler,
-                log_folder=log_folder,
                 epoch=epoch,
                 use_wandb=use_wandb,
             )
@@ -145,34 +144,25 @@ def train_vnav(
         goal_vec = goal_vec.to(device)
         actions = actions.to(device)
 
-        # Batch size
-        BS = actions.shape[0]
-
         # Observation images
         obs_images = torch.split(obs_image, 3, dim=1) # Split the image pack into individual images
         batch_obs_images = [transform(obs) for obs in obs_images]
         batch_obs_images = torch.cat(batch_obs_images, dim=1)
 
         # Generate goal mask
+        BS = actions.shape[0]
         goal_mask = (torch.rand((BS,)) < goal_mask_prob).float().to(device)
-
-        # Goal vectors
-        batch_goal_vecs = goal_vec.to(device)
 
         # Inference the observation-goal context
         obsgoal_context = model(
             "vision_encoder", 
             obs_img=batch_obs_images,
             goal_mask=goal_mask,
-            goal_vec=batch_goal_vecs,
+            goal_vec=goal_vec,
             )
         
         deltas = get_delta(actions) # Get delta between action and last action
         n_deltas = normalize_data(deltas, action_stats) # Normalize the deltas
-        n_action = n_deltas
-
-        # Sample noise to add to actions
-        noise = torch.randn(n_action.shape, device=device)
 
         # Sample a diffusion iteration for each data point
         timesteps = torch.randint(
@@ -181,7 +171,8 @@ def train_vnav(
         ).long()
 
         # Add noise to the clean images according to the noise magnitude at each diffusion iteration
-        noisy_action = noise_scheduler.add_noise(n_action, noise, timesteps)
+        noise = torch.randn(n_deltas.shape, device=device)
+        noisy_action = noise_scheduler.add_noise(n_deltas, noise, timesteps)
 
         # Predict the noise residual
         noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_context)
@@ -213,7 +204,6 @@ def evaluate_vnav(
         device: int,
         noise_scheduler: DDPMScheduler,
         epoch: int,
-        log_folder: str,
         eval_fraction: float= 0.1,
         visualization_interval: int = 3,
         use_wandb: bool = False,
@@ -244,9 +234,6 @@ def evaluate_vnav(
             obs_imgs = obs_imgs.to(device) # [BS, context_size*3, H, W]
             goal_vec = goal_vec.to(device)
             actions = actions.to(device)
-
-            # Batch size
-            BS = actions.shape[0]
  
             # Apply the transform to the observation images
             splited_obs_imgs = torch.split(obs_imgs, 3, dim=1) # Split the image pack into individual images
@@ -254,25 +241,20 @@ def evaluate_vnav(
             batch_obs_images = torch.cat(batch_obs_images, dim=1) # [BS, context_size*3, H, W]
 
             # Generate goal mask
+            BS = actions.shape[0]
             goal_mask = (torch.rand((BS,)) < goal_mask_prob).float().to(device)
-
-            # Goal vectors
-            batch_goal_vecs = goal_vec
 
             # Inference the observation-goal context
             obsgoal_context = ema_model(
                 "vision_encoder", 
                 obs_img=batch_obs_images,
                 goal_mask=goal_mask,
-                goal_vec=batch_goal_vecs,
+                goal_vec=goal_vec,
                 )
             
             # Actions
             deltas = get_delta(actions)
             n_deltas = normalize_data(deltas, action_stats)
-
-            # Sample noise to add to actions
-            noise = torch.randn(n_deltas.shape, device=device)
 
             # Sample a diffusion iteration for each data point
             timesteps = torch.randint(
@@ -281,6 +263,7 @@ def evaluate_vnav(
             ).long()
 
             # Add noise to actions 
+            noise = torch.randn(n_deltas.shape, device=device)
             noisy_deltas = noise_scheduler.add_noise(n_deltas, noise, timesteps)
 
             # Predict the noise residual
@@ -297,7 +280,7 @@ def evaluate_vnav(
                 ema_model,
                 noise_scheduler,
                 batch_obs_images[0],
-                batch_goal_vecs[0],
+                goal_vec[0],
                 pred_horizon=len(actions[0]),
                 goal_mask=goal_mask[0],
                 action_dim=2,
